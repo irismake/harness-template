@@ -330,7 +330,65 @@ harness-template/
 | `logging` | `lib/` 에서 `print` · `debugPrint` | Flutter 팩 |
 | `sensitive-log` | 로그 호출 문자열 보간에 token · password · secret · authorization · cookie 등 (`${token != null}` 처럼 상태만은 허용) | Flutter 팩 |
 | `dart-format` · `analyze-*` | `dart format` · `dart analyze` (프로젝트 `analysis_options.yaml`) — dart 가 없거나 `pub get` 전이면 건너뜀 | Flutter 팩 (`--lint`) |
+| `tdd` | TDD Guard 대상 파일에 behavior RED → GREEN 기록이 없거나 GREEN 이후 바뀜 (켰을 때만) | 공통 (`scripts/tdd.py`) |
+| `trace` | 요구사항 → 시나리오 → 테스트 연결이 끊김 · 중복 · 정의 없는 ID (켰을 때만) | 공통 (`scripts/traceability.py`) |
 | (프로젝트 ID) | `.harness/checks.py` 에 프로젝트가 추가한 검사 | 프로젝트 |
+
+### 요구사항 추적 — "기능을 요구사항대로 만들었나" 를 기계가 대조 (선택)
+
+TDD Guard 는 "테스트를 먼저 썼고 통과했다" 를 보장한다. **그 테스트가 어느 요구사항을 검사하는지**는 요구사항 추적이 보장한다.
+
+```
+요구사항 문서   #### CHAT-REQ-002 — 채팅방 접근 권한
+시나리오 문서   | CHAT-TS-004 | CHAT-REQ-002 | 제3자가 채팅방을 조회하면 403 | 통합 | api |
+테스트          @pytest.mark.scenario("CHAT-TS-004")   (Dart: test('CHAT-TS-004 …') · XCTest: test_CHAT_TS_004… — 정규식으로 지정)
+```
+
+```json
+"trace": {
+  "enabled": true,
+  "requirement_docs": ["docs/product-specs/*.md"],
+  "scenario_docs": ["docs/domains/*/test-scenarios.md"],
+  "tests": ["tests/**/test_*.py"],
+  "test_marker": "@pytest\\.mark\\.scenario\\(\\s*[\"']([^\"']+)[\"']"
+}
+```
+
+| 검사 (종료 전 · verify · pre-commit · PR CI) | 실패 예 |
+|---|---|
+| 테스트의 ID 가 시나리오 문서에 있다 · 형식이 맞다 | `CHAT-TS-999` 가 문서에 없음 |
+| ID 하나 = 테스트 하나 (`one_to_one`) | 같은 ID 를 두 테스트에 붙임 |
+| 시나리오 ID 중복 없음 | 문서 두 곳에 `CHAT-TS-001` |
+| 시나리오마다 테스트가 있다 — 문서 `> 상태:` 에 `구현 전` 이면 경고만 (문서 단계) | 테스트 없는 `CHAT-TS-005` |
+| 시나리오가 가리키는 REQ 가 정의돼 있다 | `CHAT-REQ-777` 이 요구사항 문서에 없음 |
+| REQ 마다 시나리오가 있다 (`requirement_coverage`: warn 기본 · error · off) | 시나리오 없는 `CHAT-REQ-004` |
+
+- 조회: `harness trace CHAT-REQ-002` → 시나리오 · 테스트 위치(`파일:줄`). planner 는 계획을 REQ · TS ID 로 쓰고, reviewer 는 REQ 마다 이 결과로 **테스트가 정말 그 요구사항을 검사하는지**를 본다 (연결은 기계가, 내용은 reviewer 가).
+- `test_marker` 를 비우면 테스트 파일에 나오는 시나리오 ID 를 모두 연결로 본다 (테스트 이름에 ID 를 넣는 언어용).
+- kkobungdan-be 의 `scripts/check_scenarios.py` 를 일반화한 것이다. 같은 레포 데이터(시나리오 445개)로 결과가 같음을 확인했다.
+
+### TDD Guard — TDD 를 절차가 아니라 기술로 강제 (선택)
+
+`config.json` 에서 켠다 (기본 꺼짐 · `project-design` 이 테스트 정책에 따라 켠다).
+
+```json
+"tdd": {"enabled": true, "paths": ["lib/features/**/domain/**", "lib/features/**/data/**", "lib/features/**/presentation/**/*_notifier.dart"]}
+```
+
+| 단계 | 하네스가 하는 일 |
+|---|---|
+| 테스트 작성 | 테스트 파일 · 대상 밖 파일(UI · 문구 · 문서)은 언제나 편집 가능 |
+| 기능 코드 편집 시도 | **연결된 테스트**(그 파일을 import 하거나 짝 경로 `test/…_test.dart`)에 RED 기록이 없으면 Claude 실행 전 훅이 **차단** — "[TDD Guard] … RED 미확인" |
+| `harness test <테스트>` | 실제 결과를 구조화해 기록 (`.harness/out/tdd.json`): 테스트별 `pass` · `fail`(동작 실패) · `load_error`(컴파일 실패) + 테스트 · 대상 파일 내용 해시 |
+| RED 확인 | 실패 기록이 생기면 **그 테스트와 연결된 파일만** 잠금 해제 (채팅 테스트의 RED 로 결제 코드는 안 풀린다) |
+| 구현 → GREEN | 컴파일 실패만으로는 부족 — **behavior RED → GREEN** 이 있어야 완료 (새 타입은 골격 → 동작 실패 확인 → 구현) |
+| 종료 전 · verify · pre-commit | 바뀐 대상 파일마다 완료 조건 + "GREEN 때 내용 = 지금 내용" 확인, 아니면 차단 (`[tdd]`) |
+| 커밋 | post-commit 훅이 커밋한 파일의 기록을 지운다 → 다음 변경은 새 RED 필요 (기록 재사용 방지) |
+| PR CI | `harness tdd ci` — 바뀐 테스트를 **변경 전 코드**에서 실행해 실패하는지(RED 재현), 변경 후 통과하는지(GREEN). 로컬 기록 위조 · 훅 우회 · Codex 작업도 여기서 걸린다 |
+| 예외 | 테스트로 고정할 동작이 없을 때(동작 변화 없는 리팩토링 등): `harness tdd skip <파일> --reason …` — **사용자 확인 창**, `.harness/tdd-skip.json` 에 기록되어 PR 에 보인다, 파일 내용이 바뀌면 무효 |
+
+상태 보기: `harness tdd status [파일…]` (연결된 테스트 · 편집 허용 여부 · 완료 여부).
+한계: 셸로 직접 파일을 쓰면 실행 전 훅을 피할 수 있다 → 종료 전 · pre-commit · CI 가 다시 잡는다. 테스트가 **올바른 동작**을 검사하는지는 reviewer · 사람이 본다.
 
 ---
 
@@ -346,8 +404,8 @@ Codex 에는 훅이 없으므로 `core.md` 의 "사용자 승인 없이 하지 �
 
 **확인 창 (ask)**
 
-- 명령: `git push` · `gh pr create/edit/close/ready` · `gh api` 쓰기 · `git submodule update --remote` (하네스 업데이트) · `flutter|dart pub add/remove/upgrade` · `flutterfire configure` · 릴리스 빌드
-- 파일: `.github/**` · `.claude/settings*.json` · `.harness/config.json` · `.harness/checks.py` · `fastlane/**` · `pubspec.yaml` · `analysis_options.yaml` · `android/` · `ios/` · `macos/` · 생성 파일(`*.g.dart` · `*.freezed.dart` …)
+- 명령: `git push` · `gh pr create/edit/close/ready` · `gh api` 쓰기 · `git submodule update --remote` (하네스 업데이트) · `harness tdd skip` (TDD 예외) · `flutter|dart pub add/remove/upgrade` · `flutterfire configure` · 릴리스 빌드
+- 파일: `.github/**` · `.claude/settings*.json` · `.harness/config.json` · `.harness/checks.py` · `.harness/tdd-skip.json` · `fastlane/**` · `pubspec.yaml` · `analysis_options.yaml` · `android/` · `ios/` · `macos/` · 생성 파일(`*.g.dart` · `*.freezed.dart` …)
 
 "하네스 우회 방지" 항목(설정 · 검사 · 린트 설정)이 확인 창인 이유: 에이전트가 검사에 걸렸을 때 **검사 쪽을 고쳐서** 통과시키는 것을 막기 위해서다.
 
@@ -364,7 +422,9 @@ Codex 에는 훅이 없으므로 `core.md` 의 "사용자 승인 없이 하지 �
 | `verify [--base <ref>]` | 작업 마치기 전 검사 = `check-rules` + `check-code --lint`. 기본 기준은 `origin/<base_branch>` |
 | `check-rules` | 하네스 구성 검사 |
 | `check-code [--base R \| --staged \| --file F] [--lint]` | 변경분 코드 검사 |
-| `test <파일·폴더…>` | 관련 테스트만 (`commands.test`, `.fvmrc` 가 있으면 `fvm flutter test`). 전체는 `--all` |
+| `test <파일·폴더…>` | 관련 테스트만 (`.fvmrc` 가 있으면 `fvm flutter test`), 결과를 파일별 pass · fail · 컴파일 실패로 요약하고 TDD 기록을 남긴다. 전체는 `--all` |
+| `tdd status [파일…]` · `tdd skip <파일> --reason …` · `tdd ci --base <ref>` | TDD Guard 상태 · 예외(사용자 승인) · CI 의 RED 재현 |
+| `trace [REQ·TS ID]` | 요구사항 추적 검사 · 한 요구사항 → 시나리오 → 테스트 위치 보기 |
 | `run <이름> [...]` | `commands` 의 명령 — `codegen`(build_runner) · `format` · `analyze` · 프로젝트가 추가한 것 |
 | `update` | 최신 **정식 릴리스**(`release` 브랜치)를 받고 sync · 구성 검사, 버전 변화 · 커밋 목록 · CHANGELOG 표시. 커밋은 직접 |
 | `stats [--since 2026-11-01]` | 로컬 검사 기록 집계 — 실행 위치별 통과/위반, 규칙별 위반, 차단 · 확인 이유 |
@@ -387,6 +447,8 @@ Codex 에는 훅이 없으므로 `core.md` 의 "사용자 승인 없이 하지 �
 | `source_dirs` · `test_dirs` | 팩: `lib/` · `test/` `integration_test/` | 편집 직후 검사 대상 |
 | `risk_areas` | 팩: `android/**` · `ios/**` · … · `pubspec.yaml` | L 경로 판정 기준 (설계가 네트워크 · 인증 폴더를 더한다) |
 | `commands` | 팩: test · test_all · format · analyze · codegen | `harness test` · `harness run`. `{flutter}` · `{dart}` 는 fvm 여부에 따라 바뀐다 |
+| `trace` | 꺼짐 | `{"enabled", "requirement_docs", "scenario_docs", "tests", "test_marker", "scenario_id", "requirement_id", "pending_mark", "one_to_one", "requirement_coverage"}` — 요구사항 추적 |
+| `tdd` | 꺼짐 | `{"enabled", "paths": [glob…], "exclude": [glob…]}` — TDD Guard 대상 |
 | `layers` | `[]` | `{"files": glob, "forbid": [문자열…], "message", "rule"}` — 경로별 금지 import |
 | `secret_files` · `secret_value_allow` | 코어 + 팩 | 커밋 금지 파일 패턴 · 키 값 검사 제외 파일 |
 | `protected` | 코어 + 팩 | `bash_deny` · `bash_ask` · `file_deny` · `file_ask` (`[정규식, 이유]`) · `file_allow` (정규식) |
@@ -603,9 +665,9 @@ bash tests/flutter_fixture.sh               # 실제 Flutter 앱 fixture — flu
 
 | 항목 | 방법 | 결과 |
 |---|---|---|
-| 회귀 테스트 24개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 · 자동 릴리스(릴리스 없음 · patch · minor · 깨지는 변경 · 중복 방지 · fast-forward · main 불변 · dry-run) | ✅ (Python 3.9) |
+| 회귀 테스트 41개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 · 자동 릴리스(릴리스 없음 · patch · minor · 깨지는 변경 · 중복 방지 · fast-forward · main 불변 · dry-run) · TDD Guard(꺼짐 · 차단 · 컴파일 RED · behavior RED → GREEN · GREEN 후 변경 · 커밋 후 재잠금 · 다른 기능 RED 무효 · 커밋 차단 · 예외 승인 · CI RED 재현 · 변경 전 통과 테스트 거부 · 테스트 없는 변경 거부) · 요구사항 추적(연결 · 조회 · 위반 6종 · 구현 전 경고 · 요구사항 커버리지 · 기본 marker · check-code 연동 · 꺼짐) | ✅ (Python 3.9) |
 | 실제 Flutter 앱 | 서브모듈 추가 → init → fvm 3.35.0 · `flutter create` → 린트 템플릿 · Riverpod · go_router · logger · mocktail → 골격 · 규칙 · layers → `harness test` · `run analyze` · `verify` | ✅ 테스트 통과 · 분석 0건 · verify 통과 · `flutter create` 가 `.gitignore` · `AGENTS.md` 를 덮어쓰지 않음 |
 | 위반 검출 (실제 앱) | domain 에 `material.dart` import · `print` · 포맷 깨짐 | ✅ `layer` · `logging` · `dart-format` · `analyze-warning` · `analyze-info` |
 | Claude 규칙 · 스킬 · 역할 로드 | 헤드리스 세션 기록 (Claude Code 2.1.322 · 2.1.328) | ✅ 시작 시 `CLAUDE.md` · `core.md` · `project.md`, `lib/main.dart` 를 읽으면 `architecture.md` · `flutter.md` 추가 (`testing.md` 는 안 읽힘 — 의도대로). 스킬 5 · 역할 2 등록. (2.1.328 은 임시 폴더에서 링크 없는 `CLAUDE.md` 도 읽지 않아 — 폴더 신뢰 · 경로 요인 — 규칙 로드는 2.1.322 로 확인, 스킬 · 역할 등록은 두 버전 모두 확인) |
-| Flutter 팩 fixture (`tests/flutter_fixture.sh`) | init → `flutter create` 가 진입점을 덮어쓰지 않음 → verify 통과 → 위반 7종 검출 → 원복 후 통과 → `harness test` · `flutter analyze` | ✅ |
+| Flutter 팩 fixture (`tests/flutter_fixture.sh`) | init → `flutter create` 가 진입점을 덮어쓰지 않음 → verify 통과 → 위반 7종 검출 → 원복 후 통과 → `harness test` · `flutter analyze` → TDD Guard 전체 흐름(실제 `flutter test`, CI RED 재현은 변경 전 worktree 에서) | ✅ |
 | Codex | 이 머신에 Codex CLI 가 없어 실행 확인 못 함 | ⚠️ `AGENTS.md` 생성 · 링크만 정적 확인 |

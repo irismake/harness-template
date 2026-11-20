@@ -49,6 +49,10 @@ DEFAULTS = {
     "risk_areas": [],
     "commands": {},
     "layers": [],
+    # TDD Guard (scripts/tdd.py) — 기본 꺼짐. project-design 이 테스트 정책에 따라 켜고 대상 경로를 채운다
+    "tdd": {"enabled": False, "paths": [], "exclude": []},
+    # 요구사항 추적 (scripts/traceability.py) — 기본 꺼짐. REQ → 시나리오 → 테스트 연결을 문서 · 코드에서 검사
+    "trace": {"enabled": False},
     "secret_files": [
         r"\.(p8|p12|pem|key|cer|mobileprovision|jks|keystore)$",
         r"(^|/)\.env(\.[\w.-]+)?$",
@@ -71,6 +75,7 @@ DEFAULTS = {
             [r"\bgh\s+pr\s+(create|edit|close|ready)\b", "PR 생성 · 변경은 사용자 승인 후에만"],
             [r"\bgh\s+api\b[^;&|]*(-X|--method)\s*(POST|PUT|PATCH|DELETE)\b", "GitHub 설정 · 데이터 변경은 사용자 승인 후에만"],
             [r"\bgit\s+submodule\s+update\b[^;&|]*--remote", "하네스 업데이트는 사용자 승인 후에만"],
+            [r"\b(harness|tdd\.py)\b[^;&|]*\btdd\s+skip\b|\btdd\.py\s+skip\b", "TDD 예외는 사용자 승인 후에만"],
         ],
         "file_deny": [
             [r"(^|/)\.harness/core/", "공유 하네스(서브모듈)는 프로젝트에서 고치지 않는다 — 템플릿 레포에서 고친다"],
@@ -83,6 +88,7 @@ DEFAULTS = {
             [r"(^|/)\.claude/settings[^/]*\.json$", "훅 · 권한 설정 변경은 사용자 확인 필요 (하네스 우회 방지)"],
             [r"(^|/)\.harness/config\.json$", "하네스 설정 변경은 사용자 확인 필요 (하네스 우회 방지)"],
             [r"(^|/)\.harness/checks\.py$", "프로젝트 검사 변경은 사용자 확인 필요 (하네스 우회 방지)"],
+            [r"(^|/)\.harness/tdd-skip\.json$", "TDD 예외 변경은 사용자 확인 필요 (하네스 우회 방지)"],
             [r"(^|/)fastlane/", "배포 설정 변경은 사용자 확인 필요"],
         ],
     },

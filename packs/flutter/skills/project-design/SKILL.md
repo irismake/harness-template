@@ -79,7 +79,7 @@ description: 새 Flutter 앱의 설계부터 시작한다 — 무엇을 만들�
 3. **프로젝트 규칙** (`.harness/rules/`, frontmatter `description` · `paths` 필수)
    - `project.md` 를 채운다 (템플릿의 "설계 전" 문구는 지운다, 60줄 이내).
    - `architecture.md` (`paths: ["lib/**"]`) · 필요하면 `data.md` — 카탈로그의 "규칙에 쓸 것" 중 **고른 것만**, 실제로 만든 폴더 · 파일 이름으로 쓴다. 코드에서 알 수 있는 것은 옮겨 적지 않고 위치를 가리킨다.
-4. **설정** (`.harness/config.json`): `design_done: true` · `base_branch` · `protected_branches` · `layers`(카탈로그 B2) · `risk_areas`(네트워크 · 인증 · 결제 폴더).
+4. **설정** (`.harness/config.json`): `design_done: true` · `base_branch` · `protected_branches` · `layers`(카탈로그 B2) · `risk_areas`(네트워크 · 인증 · 결제 폴더) · `tdd`(카탈로그 D — TDD Guard 를 켰으면 대상 경로).
 5. **CI**: `.github/workflows/ci.yml` 의 `push.branches` 를 보호 브랜치에 맞춘다. 빌드 확인을 골랐으면 Android(`flutter build apk --debug`) · iOS(`macos` 러너, `flutter build ios --no-codesign`) job 을 추가한다.
 6. **동기화 · 확인**
    - `.harness/core/harness sync`

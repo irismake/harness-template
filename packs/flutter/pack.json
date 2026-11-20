@@ -111,5 +111,14 @@
     ".fvm/",
     "env/*.json",
     "!env/*.example.json"
-  ]
+  ],
+  "tdd": {
+    "exclude": [
+      "**/*.g.dart",
+      "**/*.freezed.dart",
+      "**/*.gr.dart",
+      "**/*.config.dart",
+      "**/*.mocks.dart"
+    ]
+  }
 }
