@@ -105,6 +105,6 @@ python3 .harness/core/scripts/harness.py verify >/dev/null || fail "원복 후 v
 echo "4. 위반 검출 · 원복 후 통과"
 
 python3 .harness/core/scripts/harness.py test test/features/home/domain/greeting_test.dart >/dev/null || fail "harness test 실패"
-flutter analyze >/dev/null || fail "flutter analyze 실패"
+out="$(flutter analyze 2>&1)" || { echo "$out"; fail "flutter analyze 실패 (팩 린트 설정이 이 Flutter 버전과 맞지 않을 수 있다)"; }
 echo "5. harness test · flutter analyze 통과"
-echo "✓ Flutter 팩 fixture 통과"
+echo "✓ Flutter 팩 fixture 통과 ($(flutter --version | head -1))"
