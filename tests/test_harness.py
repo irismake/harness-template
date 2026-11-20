@@ -599,5 +599,115 @@ class TddGuardTest(unittest.TestCase):
         self.assertIn("연결된 테스트 변경이 없다", out)
 
 
+REQ_DOC = """# 채팅 요구사항
+
+#### CHAT-REQ-001 — 채팅방 생성
+#### CHAT-REQ-002 — 접근 권한
+본문에서 언급만 하는 (CHAT-REQ-003) 은 정의가 아니다.
+"""
+TS_DOC = """# 채팅 시나리오
+
+> 상태: 구현됨
+
+| ID | 요구사항 | 시나리오 | 테스트 |
+|----|----------|----------|--------|
+| CHAT-TS-001 | CHAT-REQ-001 | 지원하면 채팅방이 생긴다 | api |
+| CHAT-TS-002 | CHAT-REQ-002 | 제3자는 못 본다 | api |
+"""
+TEST_PY = """import pytest
+
+
+@pytest.mark.scenario("CHAT-TS-001")
+def test_create():
+    pass
+
+
+@pytest.mark.scenario("CHAT-TS-002")
+def test_forbidden():
+    pass
+"""
+
+
+class TraceabilityTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"] = {"enabled": True, "requirement_docs": ["docs/specs/*.md"],
+                        "scenario_docs": ["docs/domains/*/test-scenarios.md"], "tests": ["tests/**/test_*.py"],
+                        "test_marker": "@pytest\\.mark\\.scenario\\(\\s*[\"']([^\"']+)[\"']"}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write("docs/specs/chat.md", REQ_DOC)
+        self.p.write("docs/domains/chat/test-scenarios.md", TS_DOC)
+        self.p.write("tests/test_chat.py", TEST_PY)
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def trace(self, *args):
+        return self.p.harness("trace", *args, check=False)
+
+    def test_clean(self):
+        r = self.trace()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("요구사항 2개 · 시나리오 2개 중 2개가 테스트에 연결됨 (경고 0, 오류 0)", r.stdout)
+
+    def test_show_chain(self):
+        out = self.trace("CHAT-REQ-002").stdout
+        self.assertIn("CHAT-TS-002", out)
+        self.assertIn("tests/test_chat.py:9", out)
+        self.assertIn("요구사항: CHAT-REQ-001", self.trace("CHAT-TS-001").stdout)
+
+    def test_violations(self):
+        self.p.write("tests/test_chat.py", TEST_PY.replace('"CHAT-TS-002"', '"CHAT-TS-001"')
+                     + '\n\n@pytest.mark.scenario("CHAT-TS-999")\ndef test_ghost():\n    pass\n'
+                     + '\n\n@pytest.mark.scenario("chat-1")\ndef test_bad():\n    pass\n')
+        self.p.write("docs/domains/chat/test-scenarios.md", TS_DOC + "| CHAT-TS-001 | CHAT-REQ-002 | 중복 | api |\n| CHAT-TS-003 | CHAT-REQ-777 | 정의 없음 | api |\n")
+        r = self.trace()
+        self.assertNotEqual(r.returncode, 0)
+        for msg in ["테스트 여러 개에 붙은 ID: CHAT-TS-001", "시나리오 문서에 없는 ID: CHAT-TS-999", "형식 오류: 'chat-1'",
+                    "시나리오 ID 중복: CHAT-TS-001", "테스트가 없는 시나리오: CHAT-TS-002", "정의되지 않은 REQ: CHAT-REQ-777"]:
+            self.assertIn(msg, r.stdout)
+
+    def test_pending_doc_only_warns(self):
+        self.p.write("docs/domains/chat/test-scenarios.md", TS_DOC.replace("> 상태: 구현됨", "> 상태: 구현 전")
+                     + "| CHAT-TS-003 | CHAT-REQ-002 | 아직 테스트 없음 | api |\n")
+        r = self.trace()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("경고: docs/domains/chat/test-scenarios.md", r.stdout)
+
+    def test_requirement_coverage(self):
+        self.p.write("docs/specs/chat.md", REQ_DOC + "#### CHAT-REQ-004 — 시나리오 없음\n")
+        self.assertIn("시나리오가 없는 요구사항: CHAT-REQ-004", self.trace().stdout)
+        self.assertEqual(self.trace().returncode, 0, "기본(warn)은 경고만")
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"]["requirement_coverage"] = "error"
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.assertNotEqual(self.trace().returncode, 0)
+
+    def test_default_marker_is_any_id_in_tests(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"] = {"enabled": True, "scenario_docs": ["docs/domains/*/test-scenarios.md"]}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write("test/chat_test.dart", "void main() {\n  test('CHAT-TS-001 지원하면 채팅방', () {});\n  test('CHAT-TS-002 제3자', () {});\n}\n")
+        self.p.write("tests/test_chat.py", "")  # test_dirs(test/) 밖이라 기본 설정에서는 보지 않는다
+        r = self.trace()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_check_code_reports_trace_but_not_on_single_file(self):
+        self.p.write("tests/test_chat.py", TEST_PY.replace('"CHAT-TS-002"', '"CHAT-TS-999"'))
+        out = self.p.harness("check-code", check=False).stdout
+        self.assertIn("[trace]", out)
+        self.assertNotIn("[trace]", self.p.harness("check-code", "--file", "tests/test_chat.py", check=False).stdout)
+
+    def test_disabled(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"]["enabled"] = False
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write("tests/test_chat.py", TEST_PY.replace('"CHAT-TS-002"', '"CHAT-TS-999"'))
+        self.assertIn("꺼짐", self.trace().stdout)
+        self.assertNotIn("[trace]", self.p.harness("check-code", check=False).stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

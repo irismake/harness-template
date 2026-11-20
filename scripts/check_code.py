@@ -11,7 +11,8 @@
 
 검사
   공통   secret-file (키 · 인증서 · .env 커밋) / secret-value (형식이 확실한 키 · 토큰 값) /
-         layer (config.json "layers" — 경로별 금지 import) / tdd (TDD Guard 가 켜져 있으면 RED → GREEN 완료 여부, scripts/tdd.py)
+         layer (config.json "layers" — 경로별 금지 import) / tdd (TDD Guard 가 켜져 있으면 RED → GREEN 완료 여부, scripts/tdd.py) /
+         trace (요구사항 추적이 켜져 있으면 REQ → 시나리오 → 테스트 연결, scripts/traceability.py)
   팩     .harness/core/packs/<pack>/checks.py   (예: flutter — print · 로그 속 인증 정보)
   프로젝트 .harness/checks.py (있으면)          (프로젝트 고유 검사 — feedback 스킬이 추가)
 추가된 줄 · 새 파일만 본다. 이미 있던 위반은 세지 않는다.
@@ -27,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import events  # noqa: E402
 import tdd  # noqa: E402
+import traceability as trace_check  # noqa: E402
 from lib import ROOT, git, glob_regex, load_checks, load_config  # noqa: E402
 
 SECRET_VALUE_RES = [
@@ -165,7 +167,9 @@ def main():
     added = {p: l for p, l in added.items() if not p.startswith((".harness/core", ".claude/"))}
     ctx = Context(cfg, added, new)
     core_checks(ctx)
-    tdd.check(ctx, "staged" if args.staged else "file" if args.file else "base")
+    mode = "staged" if args.staged else "file" if args.file else "base"
+    tdd.check(ctx, mode)
+    trace_check.check(ctx, mode)
     modules = load_checks(cfg)
     for m in modules:
         if hasattr(m, "check"):

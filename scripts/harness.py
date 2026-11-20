@@ -9,6 +9,7 @@
   check-code [...]   변경분 코드 검사 (--base · --staged · --file · --lint)
   test <대상>        관련 테스트만 실행 (config commands.test). 전체는 --all (보통 CI 가 한다)
   tdd status|skip|ci  TDD Guard 상태 · 예외(사용자 승인) · CI 의 RED 재현 검사
+  trace [ID]         요구사항 추적 검사 · REQ/시나리오 하나의 연결(→ 시나리오 → 테스트 위치) 보기
   run <이름> [...]   config commands 의 명령 실행 (예: run codegen · run format · run analyze)
   update             공유 하네스(서브모듈)를 최신으로 받고 sync — 변경 내역을 보여 준다. 커밋은 직접
   stats [--since D]  로컬 검사 기록(.harness/out/events.jsonl) 집계
@@ -261,11 +262,14 @@ def main():
     p.add_argument("name")
     p.add_argument("extra", nargs="*")
     sub.add_parser("tdd", add_help=False)
+    sub.add_parser("trace", add_help=False)
     sub.add_parser("update")
     p = sub.add_parser("stats")
     p.add_argument("--since")
 
     argv = sys.argv[1:]
+    if argv[:1] == ["trace"]:
+        sys.exit(py("traceability.py", *argv[1:]))
     if argv[:1] == ["tdd"]:
         sys.exit(py("tdd.py", *argv[1:]))
     if argv[:1] == ["check-code"]:

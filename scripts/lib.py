@@ -51,6 +51,8 @@ DEFAULTS = {
     "layers": [],
     # TDD Guard (scripts/tdd.py) — 기본 꺼짐. project-design 이 테스트 정책에 따라 켜고 대상 경로를 채운다
     "tdd": {"enabled": False, "paths": [], "exclude": []},
+    # 요구사항 추적 (scripts/traceability.py) — 기본 꺼짐. REQ → 시나리오 → 테스트 연결을 문서 · 코드에서 검사
+    "trace": {"enabled": False},
     "secret_files": [
         r"\.(p8|p12|pem|key|cer|mobileprovision|jks|keystore)$",
         r"(^|/)\.env(\.[\w.-]+)?$",
