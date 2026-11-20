@@ -23,11 +23,14 @@ flutter create --org com.example --project-name fixture_app --platforms android,
 grep -q 'harness:start' AGENTS.md || fail "flutter create 가 AGENTS.md 를 덮어썼다"
 grep -q '.harness/out/' .gitignore || fail "flutter create 가 .gitignore 를 덮어썼다"
 cp .harness/core/packs/flutter/templates/analysis_options.yaml analysis_options.yaml
+# Material import 는 Flutter 버전마다 다르다 (3.50+: package:material_ui/material_ui.dart) — flutter create 가 만든 것을 따른다
+MAT="$(grep -m1 -oE "package:[a-z_]+/material(_ui)?\.dart" lib/main.dart || echo package:flutter/material.dart)"
+echo "  Material import: $MAT"
 rm -f test/widget_test.dart
 mkdir -p lib/features/home/presentation lib/features/home/domain
-cat > lib/main.dart <<'EOF'
+cat > lib/main.dart <<EOF
 import 'package:fixture_app/features/home/presentation/home_screen.dart';
-import 'package:flutter/material.dart';
+import '$MAT';
 
 void main() {
   runApp(const App());
@@ -42,8 +45,8 @@ class App extends StatelessWidget {
   }
 }
 EOF
-cat > lib/features/home/presentation/home_screen.dart <<'EOF'
-import 'package:flutter/material.dart';
+cat > lib/features/home/presentation/home_screen.dart <<EOF
+import '$MAT';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -80,7 +83,7 @@ EOF
 python3 - <<'EOF'
 import json
 p = ".harness/config.json"; c = json.load(open(p))
-c.update(design_done=True, layers=[{"files": "lib/features/**/domain/**", "forbid": ["package:flutter/material.dart", "/presentation/"],
+c.update(design_done=True, layers=[{"files": "lib/features/**/domain/**", "forbid": ["package:flutter/material.dart", "package:material_ui/", "/presentation/"],
                                     "message": "domain 은 UI · presentation 을 참조하지 않는다"}])
 json.dump(c, open(p, "w"), indent=2)
 EOF
@@ -93,7 +96,7 @@ python3 .harness/core/scripts/harness.py verify >/dev/null || { python3 .harness
 echo "3. verify 통과 (변경 없음)"
 
 cp lib/features/home/domain/greeting.dart "$WORK/greeting.bak"
-printf "import 'package:flutter/material.dart';\nString greeting(String name) {  print(name);  return 'Hello, \$name'; }\n" > lib/features/home/domain/greeting.dart
+printf "import '$MAT';\nString greeting(String name) {  print(name);  return 'Hello, \$name'; }\n" > lib/features/home/domain/greeting.dart
 expect_fail layer logging dart-format analyze-warning analyze-info
 cp "$WORK/greeting.bak" lib/features/home/domain/greeting.dart
 

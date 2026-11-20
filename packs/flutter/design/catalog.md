@@ -52,7 +52,7 @@ test/ 는 lib/ 구조를 그대로
 config `layers` (결정적 검사):
 ```json
 [
-  {"files": "lib/features/**/domain/**", "forbid": ["package:flutter/material.dart", "package:flutter/widgets.dart", "package:flutter/cupertino.dart", "/data/", "/presentation/"],
+  {"files": "lib/features/**/domain/**", "forbid": ["package:flutter/material.dart", "package:flutter/widgets.dart", "package:flutter/cupertino.dart", "package:material_ui/", "package:cupertino_ui/", "/data/", "/presentation/"],
    "message": "domain 은 UI · data · presentation 을 참조하지 않는다", "rule": ".harness/rules/architecture.md"},
   {"files": "lib/features/**/presentation/**", "forbid": ["/data/"],
    "message": "presentation 은 data 를 직접 참조하지 않는다 (domain · 상태를 거친다)", "rule": ".harness/rules/architecture.md"},
@@ -60,7 +60,8 @@ config `layers` (결정적 검사):
    "message": "core 는 특정 기능을 참조하지 않는다", "rule": ".harness/rules/architecture.md"}
 ]
 ```
-(백엔드 클라이언트 패키지 — 예: `package:dio/` — 를 domain · presentation 금지 목록에 더한다)
+(백엔드 클라이언트 패키지 — 예: `package:dio/` — 를 domain · presentation 금지 목록에 더한다.
+Flutter 3.50 부터 Material 은 `package:material_ui/material_ui.dart` 로 옮겨졌다 — `flutter create` 가 만든 `lib/main.dart` 의 import 를 따르고, UI 금지 목록에는 옛 경로 · 새 경로를 둘 다 둔다)
 
 계층 우선: `lib/{core, data/{dto,sources,repositories}, domain/{entities,repositories}, presentation/<화면>/}` — layers 는 같은 원리로 `lib/domain/**` · `lib/presentation/**` 에 건다.
 
