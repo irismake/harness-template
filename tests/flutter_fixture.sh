@@ -111,6 +111,7 @@ python3 .harness/core/scripts/harness.py test test/features/home/domain/greeting
 out="$(flutter analyze 2>&1)" || { echo "$out"; fail "flutter analyze 실패 (팩 린트 설정이 이 Flutter 버전과 맞지 않을 수 있다)"; }
 echo "5. harness test · flutter analyze 통과"
 # ── TDD Guard (실제 flutter test 로) ──
+unset GITHUB_ACTIONS  # 여기부터는 로컬 개발을 흉내 낸다 (CI 에서는 로컬 기록 대신 tdd ci 가 검사하므로 건너뛰게 되어 있다)
 python3 - <<'PY'
 import json
 p = ".harness/config.json"; c = json.load(open(p))
