@@ -1114,5 +1114,102 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(json.loads(rows[-1])["kind"], "work")
 
 
+
+class DuplicateRuleTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.write("lib/a.dart", "int a = 1;\n")
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def test_same_rule_in_two_documents(self):
+        rule = "- 날짜는 항상 UTC 로 저장하고 화면에서만 지역 시간으로 바꾼다.\n"
+        self.p.write(".harness/rules/data.md", '---\ndescription: 데이터\npaths:\n  - "lib/**"\n---\n# 데이터\n' + rule)
+        self.p.harness("sync")
+        self.assertEqual(self.p.harness("check-rules", check=False).returncode, 0)
+        with open(self.p.root / "CLAUDE.md", "a") as f:
+            f.write(rule)  # 어댑터에 복사
+        out = self.p.harness("check-rules", check=False).stdout
+        self.assertIn("같은 규칙이 여러 문서에 있다", out)
+        self.assertIn("project/data.md", out)
+        self.assertIn("CLAUDE.md", out)
+
+    def test_fresh_project_has_no_false_positive(self):
+        self.assertEqual(self.p.harness("check-rules", check=False).returncode, 0)
+
+
+FAKE_GH = """#!/usr/bin/env python3
+import json, sys, pathlib
+cfg = json.loads(pathlib.Path("fakegh.json").read_text())
+a = sys.argv[1:]
+if a[:2] == ["pr", "list"]:
+    print(json.dumps(cfg.get("prs", [])))
+elif a[:2] == ["repo", "view"]:
+    print(json.dumps({"nameWithOwner": "o/r"}))
+elif a[:1] == ["api"]:
+    print(json.dumps(cfg.get("runs", [])))
+"""
+
+
+class PromotionTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["promotion"] = [["dev", "main"]]
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write(".gitignore", (self.p.root / ".gitignore").read_text() + "fakegh.json\n")
+        self.p.commit("chore: 설치", verify=False)
+        bare = Path(self.p.tmp.name) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        self.p.run("git", "remote", "add", "origin", str(bare))
+        self.p.run("git", "push", "-q", "origin", "main", "main:dev")
+        gh = Path(self.p.tmp.name) / "gh"
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        self.env = {**ENV, "HARNESS_GH": str(gh)}
+        self.fake(runs=[{"name": "Harness", "status": "completed", "conclusion": "success"}])
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def fake(self, **kv):
+        (self.p.root / "fakegh.json").write_text(json.dumps(kv))
+
+    def check(self, head="dev", base="main"):
+        return subprocess.run([sys.executable, ".harness/core/scripts/harness.py", "pr", "check-promotion", head, base],
+                              cwd=self.p.root, capture_output=True, text=True, env=self.env)
+
+    def advance_dev(self):
+        self.p.run("git", "switch", "-q", "-c", "dev", "--track", "origin/dev")
+        self.p.write("lib/x.dart", "int x = 1;\n")
+        self.p.commit("feat: x", verify=False)
+        self.p.run("git", "push", "-q", "origin", "dev")
+
+    def test_empty_promotion(self):
+        self.assertIn("빈 승격", self.check().stdout)
+
+    def test_passes_and_rejects(self):
+        self.advance_dev()
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("커밋 1개", r.stdout)
+        self.fake(prs=[{"number": 7, "url": "https://x/pr/7"}], runs=[{"name": "Harness", "status": "completed", "conclusion": "success"}])
+        self.assertIn("이미 열린 승격 PR", self.check().stdout)
+        self.fake(runs=[{"name": "Flutter", "status": "completed", "conclusion": "failure"}, {"name": "Harness", "status": "in_progress", "conclusion": None}])
+        out = self.check().stdout
+        self.assertIn("검사 실패: Flutter", out)
+        self.assertIn("아직 끝나지 않았다: Harness", out)
+        self.assertIn("승격 경로가 아니다", self.check("main", "dev").stdout)
+
+    def test_no_promotion_config(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg.pop("promotion")
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.assertIn("승격 경로(promotion)가 없다", self.check().stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

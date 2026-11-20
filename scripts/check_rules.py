@@ -14,6 +14,7 @@
   7. 공유 하네스(.harness/core)를 프로젝트 안에서 고치지 않았다
 고치는 방법: 대부분 `.harness/core/harness sync`
 """
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +24,39 @@ import sync  # noqa: E402
 from lib import CONFIG_PATH, CORE, HARNESS, ROOT, front_matter, git, glob_regex, load_config, pack_dir, tracked_files  # noqa: E402
 
 FORBIDDEN_COPIES = [".codex/rules", ".cursor", ".cursorrules", "CURSOR.md"]
+MIN_DUP_LEN = 25
+
+
+def _norm(line):
+    t = re.sub(r"^\s*(?:[-*>]|\d+\.)\s+", "", line.strip())
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) < MIN_DUP_LEN or t.startswith(("#", "|", "```", "<!--")) or set(t) <= set("-|: "):
+        return None
+    return t
+
+
+def duplicate_rules(cfg):
+    """프로젝트 규칙 · 어댑터에 같은 문장이 두 곳 이상 — 한 규칙은 가장 좁은 문서 한 곳에만 (feedback 스킬)"""
+    shipped = set()  # 템플릿이 원래 넣는 문장은 제외 (오탐 방지)
+    for f in list((CORE / "templates").glob("*.md")):
+        shipped |= {n for n in map(_norm, f.read_text().splitlines()) if n}
+    sources = [(f"{g}/{p.name}", p, g == "project") for g, p in sync.rule_sources(cfg)]
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        if (ROOT / name).exists():
+            sources.append((name, ROOT / name, True))
+    seen = {}
+    for label, path, owned in sources:
+        text = sync.BLOCK_RE.sub("", path.read_text())
+        for no, line in enumerate(text.splitlines(), 1):
+            n = _norm(line)
+            if n and n not in shipped:
+                seen.setdefault(n, []).append((label, no, owned))
+    out = []
+    for n, locs in seen.items():
+        files = {l for l, _, _ in locs}
+        if len(files) > 1 and any(o for _, _, o in locs):
+            out.append(f"같은 규칙이 여러 문서에 있다: \"{n[:60]}…\" — {', '.join(f'{l}:{no}' for l, no, _ in locs)} (가장 좁은 한 곳에만 둔다)")
+    return out
 
 
 def main():
@@ -79,6 +113,7 @@ def main():
         problems.append(p)
     if p := sync.settings_problem():
         problems.append(p)
+    problems += duplicate_rules(cfg)
     if not (ROOT / "CLAUDE.md").exists():
         problems.append("CLAUDE.md 가 없습니다 (`harness init`)")
 
