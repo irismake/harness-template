@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""커밋 메시지 형식: <type>: <요약> — type 은 .harness/config.json 의 commit_types (규칙: core.md "Git")"""
+import re
+import sys
+from pathlib import Path
+
+core = Path(".harness/core/scripts")
+if not (core / "lib.py").exists():
+    sys.exit(0)
+sys.path.insert(0, str(core.resolve()))
+from lib import load_config  # noqa: E402
+
+first = Path(sys.argv[1]).read_text().splitlines()[0] if Path(sys.argv[1]).read_text().strip() else ""
+# git 이 만드는 메시지는 그대로 둔다
+if first.startswith(("Merge ", "Revert ", "fixup! ", "squash! ", "amend! ")):
+    sys.exit(0)
+types = load_config()["commit_types"]
+if not re.match(rf"^({'|'.join(types)})(\([^)]+\))?!?: .+", first):
+    print(f"❌ 커밋 메시지는 '<type>: <요약>' 형식이어야 합니다. (type: {', '.join(types)})", file=sys.stderr)
+    print(f"   지금: {first}", file=sys.stderr)
+    sys.exit(1)

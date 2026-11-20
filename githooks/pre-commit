@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# 커밋 전 검사 (Claude · Codex · 사람 공통). harness init 이 core.hooksPath 로 연결한다.
+# stage 된 변경만 본다. 우회(--no-verify)해도 PR CI 가 같은 검사를 다시 한다.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+export HARNESS_SOURCE="${HARNESS_SOURCE:-git-pre-commit}"
+core=".harness/core/scripts"
+if [ ! -f "$core/check_code.py" ]; then
+  echo "⚠️  하네스(.harness/core)가 비어 있어 검사를 건너뜁니다: git submodule update --init" >&2
+  exit 0
+fi
+
+python3 "$core/check_code.py" --staged --lint
+
+# 하네스 구성 · 진입점을 바꿨으면 구성 검사
+if git diff --cached --name-only | grep -qE '^(\.harness/|\.claude/|AGENTS\.md|CLAUDE\.md)'; then
+  python3 "$core/check_rules.py"
+fi

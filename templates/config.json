@@ -1,0 +1,8 @@
+{
+  "pack": "{{pack}}",
+  "design_done": false,
+  "base_branch": "main",
+  "protected_branches": ["main"],
+  "risk_areas": [],
+  "layers": []
+}

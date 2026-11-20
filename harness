@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# 하네스 명령 진입점. 프로젝트 루트에서: .harness/core/harness <명령>   (명령 목록: .harness/core/harness -h)
+exec python3 "$(cd "$(dirname "$0")" && pwd)/scripts/harness.py" "$@"

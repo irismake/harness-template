@@ -1,0 +1,16 @@
+# 하네스(.harness/core 서브모듈) · GitHub Actions 업데이트를 PR 로 알려 준다.
+# 하네스 업데이트 PR 은 CI(하네스 검사)를 통과하는지 보고 머지한다. 머지 후 로컬: git submodule update && .harness/core/harness sync
+version: 2
+updates:
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
