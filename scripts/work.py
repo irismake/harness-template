@@ -270,8 +270,9 @@ def finalize():
     if state is None:
         return
     try:
-        import usage  # 3단계: 사용량 집계 (없거나 실패해도 정리는 한다)
-        usage.record_work(state)
+        import usage  # 사용량 집계 (실패해도 정리는 한다)
+        cfg = load_config()
+        usage.record_work(state, lane=effective_lane(cfg, state, changed_files(cfg))[0])
     except Exception as e:  # noqa: BLE001 — 측정 실패는 경고만
         if not isinstance(e, ImportError):
             print(f"[usage] warning: {e}", file=sys.stderr)

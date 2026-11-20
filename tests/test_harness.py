@@ -5,6 +5,7 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1014,6 +1015,103 @@ class GuardTest(unittest.TestCase):
         self.stop()
         self.assertIsNone(self.returned())
         self.assertEqual(self.sub_tool("planner", "Write", file_path=str(self.p.root / CHAT))["permissionDecision"], "allow")
+
+
+
+def _iso(ts):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class UsageTest(unittest.TestCase):
+    """토큰 실측 — 세션 기록 파싱 · 중복 제거 · 구간 · 역할 · Codex 증분 · 원문 미저장 · 도입 전후 버전"""
+
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.commit("chore: 설치", verify=False)
+        self.home = Path(self.p.tmp.name) / "home"
+        self.env = {**ENV, "HARNESS_CLAUDE_HOME": str(self.home / ".claude"), "HARNESS_CODEX_HOME": str(self.home / ".codex")}
+        self.pdir = self.home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.p.root.resolve()))
+        self.pdir.mkdir(parents=True)
+        self.t0 = time.time() - 3600
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def msg(self, mid, ts, branch="feat/chat", out=10, inp=100, read=1000):
+        return json.dumps({"type": "assistant", "timestamp": _iso(ts), "gitBranch": branch, "message": {
+            "id": mid, "content": [{"type": "text", "text": "SECRET 대화 원문"}],
+            "usage": {"input_tokens": inp, "cache_creation_input_tokens": 50, "cache_read_input_tokens": read, "output_tokens": out}}})
+
+    def write_claude(self):
+        lines = [self.msg("m1", self.t0 + 10, out=5), self.msg("m1", self.t0 + 11, out=20),   # 같은 응답 두 줄 → 한 번
+                 self.msg("m2", self.t0 + 20), self.msg("m0", self.t0 - 100)]                 # m0 은 구간 밖
+        (self.pdir / "s1.jsonl").write_text("\n".join(lines) + "\n")
+        sub = self.pdir / "s1/subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-a1.jsonl").write_text(self.msg("r1", self.t0 + 15, out=7) + "\n")
+        (sub / "agent-a1.meta.json").write_text(json.dumps({"agentType": "reviewer"}))
+
+    def usage_mod(self):
+        code = (f"import sys,json; sys.path.insert(0, '.harness/core/scripts'); import usage; "
+                f"st={{'slug':'feat-chat','branch':'feat/chat','started_ts':{self.t0},'sessions':['s1'],'rounds':[1],'harness_version':'0.4.0'}}; "
+                f"print(json.dumps(usage.record_work(st, lane='L', end={self.t0 + 100})))")
+        r = subprocess.run([sys.executable, "-c", code], cwd=self.p.root, capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_claude_window_roles_and_dedupe(self):
+        self.write_claude()
+        rec = self.usage_mod()
+        main, rev = rec["roles"]["main"], rec["roles"]["reviewer"]
+        self.assertEqual(main["messages"], 2, "m1 중복 제거 + m0 구간 밖")
+        self.assertEqual(main["output"], 30, "m1 은 가장 큰 output(20) 하나 + m2(10)")
+        self.assertEqual((rev["calls"], rev["output"]), (1, 7))
+        self.assertEqual((rec["lane"], rec["harness_version"], rec["agent"]), ("L", "0.4.0", "claude"))
+        raw = (self.p.root / ".harness/out/usage.jsonl").read_text()
+        self.assertNotIn("SECRET", raw, "원문을 남기지 않는다")
+
+    def test_codex_cumulative_delta(self):
+        d = self.home / ".codex/sessions/2026/11/20"
+        d.mkdir(parents=True)
+        tc = lambda ts, i, c, o: json.dumps({"timestamp": _iso(ts), "type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": i, "cached_input_tokens": c, "output_tokens": o}}}})
+        (d / "rollout-x.jsonl").write_text("\n".join([
+            json.dumps({"type": "session_meta", "payload": {"id": "c1", "cwd": str(self.p.root), "git": {"branch": "feat/chat"}}}),
+            tc(self.t0 - 50, 1000, 500, 10), tc(self.t0 + 30, 3000, 1500, 40), tc(self.t0 + 60, 5000, 2000, 90)]) + "\n")
+        rec = self.usage_mod()
+        cx = rec["roles"]["codex-main"]
+        self.assertEqual((cx["output"], cx["cache_read"], cx["input"]), (80, 1500, 2500), "구간 끝 누적 − 구간 시작 전 누적")
+        self.assertEqual(rec["agent"], "codex")
+
+    def test_report_and_compare(self):
+        self.write_claude()
+        self.usage_mod()
+        out = subprocess.run([sys.executable, ".harness/core/scripts/usage.py"], cwd=self.p.root, capture_output=True, text=True, env=self.env).stdout
+        self.assertIn("| 0.4.0 | L | 1 |", out)
+        self.assertIn("브랜치 실측", out)
+        cmp_ = subprocess.run([sys.executable, ".harness/core/scripts/usage.py", "--compare", "0.3.0", "0.4.0"], cwd=self.p.root, capture_output=True, text=True, env=self.env).stdout
+        self.assertIn("표본 부족", cmp_)
+
+    def test_version_before_adoption(self):
+        code = ("import sys; sys.path.insert(0, '.harness/core/scripts'); import usage, time; "
+                "print(usage.harness_version_at(time.time()), '|', usage.harness_version_at(0))")
+        out = subprocess.run([sys.executable, "-c", code], cwd=self.p.root, capture_output=True, text=True, env=self.env).stdout
+        now, before = [x.strip() for x in out.split("|")]
+        self.assertNotEqual(now, "도입 전")
+        self.assertEqual(before, "도입 전", "하네스가 들어오기 전 시각은 '도입 전'")
+
+    def test_finalize_records_usage(self):
+        self.write_claude()
+        self.p.run("git", "switch", "-q", "-c", "feat/chat")
+        self.p.write("lib/a.dart", "int a = 1;\n")
+        subprocess.run([sys.executable, ".harness/core/scripts/work.py", "lane", "S"], cwd=self.p.root, env=self.env, capture_output=True)
+        subprocess.run([sys.executable, ".harness/core/scripts/harness.py", "verify"], cwd=self.p.root, env=self.env, capture_output=True)
+        r = subprocess.run([sys.executable, ".harness/core/scripts/work.py", "end"], cwd=self.p.root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = (self.p.root / ".harness/out/usage.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(rows[-1])["kind"], "work")
 
 
 if __name__ == "__main__":
