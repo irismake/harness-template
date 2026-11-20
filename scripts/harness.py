@@ -38,6 +38,31 @@ CORE_FILES = {
     "dependabot.yml": ".github/dependabot.yml",
 }
 GITIGNORE = [".harness/out/", ".claude/settings.local.json"]
+# 정식 릴리스만 가리키는 브랜치 — 릴리스 워크플로가 CI 를 통과한 태그 커밋으로만 옮긴다.
+# 프로젝트 서브모듈은 이 브랜치를 추적한다 (Dependabot · harness update 모두 이 기준).
+RELEASE_BRANCH = "release"
+
+
+def core_version():
+    f = CORE / "VERSION"
+    return f.read_text().strip() if f.exists() else "?"
+
+
+def track_release_branch():
+    """.gitmodules 에 branch = release 를 기록한다 (이미 있으면 그대로). 바꿨으면 True"""
+    gm = ROOT / ".gitmodules"
+    if CORE != HARNESS / "core" or not gm.exists():
+        return False
+    rel = os.path.relpath(CORE, ROOT)
+    names = git("config", "-f", str(gm), "--get-regexp", r"submodule\..*\.path", check=False).splitlines()
+    name = next((l.split()[0][len("submodule."):-len(".path")] for l in names if l.split()[-1] == rel), None)
+    if not name:
+        return False
+    key = f"submodule.{name}.branch"
+    if git("config", "-f", str(gm), "--get", key, check=False).strip():
+        return False
+    git("config", "-f", str(gm), key, RELEASE_BRANCH)
+    return True
 
 
 def py(script, *args, source=None):
@@ -58,7 +83,7 @@ def cmd_init(args):
         sys.exit("git 저장소가 아닙니다. 먼저 git init 을 하세요.")
     if CORE != HARNESS / "core":
         print(f"⚠️  하네스가 .harness/core 에 있지 않습니다 ({CORE}). 서브모듈로 추가하세요:\n"
-              "   git submodule add https://github.com/irismake/harness-template .harness/core")
+              "   git submodule add -b release https://github.com/irismake/harness-template .harness/core")
     existing = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
     pack = args.pack or existing.get("pack")
     if not pack:
@@ -91,6 +116,9 @@ def cmd_init(args):
         gi.write_text("\n".join(lines + ["", "# harness", *missing]).lstrip("\n") + "\n")
         created.append(".gitignore (하네스 항목)")
 
+    if track_release_branch():
+        created.append(f".gitmodules (branch = {RELEASE_BRANCH} — 정식 릴리스만 업데이트 대상)")
+
     cfg = load_config()
     links = sync.apply_links(cfg)
     sync.apply_agents_md(cfg)
@@ -99,7 +127,7 @@ def cmd_init(args):
     for f in (CORE / "githooks").iterdir():
         f.chmod(0o755)
 
-    print("✓ 하네스 설치")
+    print(f"✓ 하네스 {core_version()} 설치")
     for c in created:
         print(f"  + {c}")
     print(f"  + .claude/ 링크 {len([l for l in links if l.startswith('+')])}개 · AGENTS.md 표")
@@ -161,13 +189,16 @@ def cmd_update(_):
     if CORE != HARNESS / "core":
         sys.exit("서브모듈(.harness/core)로 설치된 프로젝트에서만 쓴다.")
     rel = os.path.relpath(CORE, ROOT)
+    track_release_branch()
     old = git("rev-parse", "HEAD", cwd=CORE).strip()
+    old_version = core_version()
+    # .gitmodules 의 branch(release) 최신 커밋 = 최신 정식 릴리스
     subprocess.run(["git", "-C", str(ROOT), "submodule", "update", "--init", "--remote", rel], check=True)
     new = git("rev-parse", "HEAD", cwd=CORE).strip()
     if old == new:
-        print("이미 최신입니다.")
+        print(f"이미 최신 릴리스입니다 ({old_version}).")
         return
-    print(f"하네스 {old[:7]} → {new[:7]}")
+    print(f"하네스 {old_version} → {core_version()}  ({old[:7]} → {new[:7]})")
     print(git("log", "--oneline", f"{old}..{new}", cwd=CORE))
     print("CHANGELOG 변경:")
     print(git("diff", old, new, "--", "CHANGELOG.md", cwd=CORE) or "  (없음)")

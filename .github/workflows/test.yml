@@ -1,21 +1,28 @@
-# 템플릿 레포 자체 검사 — 임시 프로젝트에 하네스를 설치해 init · sync · 검사 · 훅을 끝까지 돌린다.
+# Template CI — "하네스 자체가 정상인가?"
+# PR · main push 마다, 그리고 릴리스 워크플로(release.yml)가 태그를 정식 릴리스로 올리기 전에 다시 돈다.
+#   unit     회귀 테스트: init · 재실행 · 구성 검사 · sync · Secret · 로그 · 계층 · git 훅 · Claude 훅 · 차단 패턴 ·
+#            서브모듈 수정 감지 · release 브랜치 추적 · 이전 릴리스 → 지금 업그레이드 호환성
+#   flutter  실제 Flutter 앱 fixture: init → flutter create → verify 통과 → 계층 · print · 포맷 · 분석 위반 검출 → harness test
 name: Test
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  unit:
     name: Harness template
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 업그레이드 호환성 테스트가 이전 릴리스 태그를 쓴다
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -23,3 +30,16 @@ jobs:
         run: python -m py_compile scripts/*.py scripts/hooks/*.py packs/*/checks.py githooks/commit-msg
       - name: 회귀 테스트
         run: python -m unittest discover -s tests -v
+
+  flutter:
+    name: Flutter pack fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Flutter 앱에 설치 · 검사
+        run: bash tests/flutter_fixture.sh

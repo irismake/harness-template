@@ -20,12 +20,28 @@
 
 ```sh
 python3 -m unittest discover -s tests -v     # 임시 프로젝트에 설치해 끝까지 돌린다 (Flutter 불필요)
+bash tests/flutter_fixture.sh                 # 실제 Flutter 앱 fixture (flutter 필요)
 ```
+
+PR 의 Template CI(`.github/workflows/test.yml`)가 둘 다 돌린다.
 
 새 검사 · 패턴은 테스트에 "잡혀야 하는 것" 과 "잡히면 안 되는 것" 을 둘 다 넣는다.
 
-## 내보내기
+## 릴리스
 
-1. `CHANGELOG.md` 에 버전 · 변경 · (있으면) 프로젝트가 할 일을 적는다.
-2. `main` 에 머지 → 프로젝트에는 Dependabot PR 로 알려진다 (또는 `harness update`).
-3. 설정 키 이름 변경 · 규칙 파일 이름 변경처럼 프로젝트를 깨뜨리는 변경은 피하고, 꼭 필요하면 옛 이름도 한동안 읽게 한다.
+`main` 머지만으로는 프로젝트에 퍼지지 않는다. **태그 + release 브랜치**가 정식 릴리스다.
+
+1. `main` 의 Template CI(`Test`)가 통과한 상태에서
+2. `VERSION` 을 올리고 `CHANGELOG.md` 에 `## X.Y.Z — 날짜` 항목(변경 · 프로젝트가 할 일)을 쓴 커밋을 `main` 에 머지한다.
+3. 그 커밋에 태그를 붙여 push 한다.
+
+   ```sh
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+4. 릴리스 워크플로(`.github/workflows/release.yml`)가 확인한다: 태그 = `VERSION` · CHANGELOG 항목 · `main` 에 있는 커밋 · 현재 `release` 보다 새 커밋 · **Template CI 재실행 통과**. 모두 통과하면 `release` 브랜치를 그 커밋으로 옮긴다.
+5. 각 프로젝트의 Dependabot 이 다음 확인 때 업데이트 PR 을 연다 → 프로젝트 CI → 사람이 머지.
+
+실패하면 `release` 는 움직이지 않는다. 고친 뒤 태그를 지우고(`git push origin :refs/tags/vX.Y.Z`) 다시 붙이거나 다음 버전으로 낸다.
+
+버전 규칙: 규칙 · 검사가 **더 엄격해져** 기존 프로젝트가 실패할 수 있으면 minor 이상, 문서 · 오탐 수정은 patch. 설정 키 · 규칙 파일 이름 변경처럼 프로젝트를 깨뜨리는 변경은 피하고, 꼭 필요하면 옛 이름도 한동안 읽게 한다.
