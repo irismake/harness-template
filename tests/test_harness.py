@@ -275,5 +275,109 @@ class SubmoduleTest(unittest.TestCase):
             p.tmp.cleanup()
 
 
+def _git(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True, env=GIT_FILE_ENV).stdout.strip()
+
+
+# 로컬 경로 서브모듈(file://)을 허용 — 테스트에서만
+GIT_FILE_ENV = {**ENV, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "protocol.file.allow", "GIT_CONFIG_VALUE_0": "always"}
+
+
+class ReleaseBranchTest(unittest.TestCase):
+    """서브모듈은 release 브랜치만 따라간다 — main 의 개발 커밋은 업데이트 대상이 아니다."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        # 가짜 템플릿 원격: 지금 작업 트리 = v0.1.0 (release), 그 뒤 main 에 개발 커밋
+        self.src = base / "template"
+        shutil.copytree(TEMPLATE, self.src, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        (self.src / "VERSION").write_text("0.1.0\n")
+        _git(self.src, "init", "-q", "-b", "main")
+        _git(self.src, "add", "-A")
+        _git(self.src, "commit", "-q", "-m", "release 0.1.0")
+        _git(self.src, "tag", "v0.1.0")
+        _git(self.src, "branch", "release")
+        (self.src / "CHANGELOG.md").write_text("개발 중\n")
+        _git(self.src, "commit", "-qam", "개발 중 커밋")
+        self.dev_commit = _git(self.src, "rev-parse", "HEAD")
+        self.release_commit = _git(self.src, "rev-parse", "v0.1.0")
+        # 프로젝트: 문서대로 -b release 로 추가
+        self.app = base / "app"
+        self.app.mkdir()
+        _git(self.app, "init", "-q", "-b", "main")
+        _git(self.app, "submodule", "add", "-q", "-b", "release", str(self.src), ".harness/core")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def harness(self, *args):
+        return subprocess.run([sys.executable, ".harness/core/scripts/harness.py", *args], cwd=self.app,
+                              capture_output=True, text=True, env=GIT_FILE_ENV)
+
+    def core_head(self):
+        return _git(self.app / ".harness/core", "rev-parse", "HEAD")
+
+    def test_submodule_tracks_release_not_main(self):
+        self.assertEqual(self.core_head(), self.release_commit)
+        self.harness("init", "flutter")
+        self.assertEqual(_git(self.app, "config", "-f", ".gitmodules", "submodule..harness/core.branch"), "release")
+        out = self.harness("update").stdout
+        self.assertIn("이미 최신 릴리스", out)
+        self.assertEqual(self.core_head(), self.release_commit, "main 의 개발 커밋을 받으면 안 된다")
+
+    def test_update_picks_new_release(self):
+        self.harness("init", "flutter")
+        _git(self.app, "add", "-A")
+        _git(self.app, "commit", "-q", "--no-verify", "-m", "chore: 하네스 설치")
+        (self.src / "VERSION").write_text("0.2.0\n")
+        _git(self.src, "commit", "-qam", "release 0.2.0")
+        _git(self.src, "tag", "v0.2.0")
+        _git(self.src, "branch", "-f", "release", "v0.2.0")
+        r = self.harness("update")
+        self.assertIn("하네스 0.1.0 → 0.2.0", r.stdout, r.stdout + r.stderr)
+        self.assertEqual(self.core_head(), _git(self.src, "rev-parse", "v0.2.0"))
+
+    def test_init_adds_branch_when_submodule_added_without_it(self):
+        _git(self.app, "config", "-f", ".gitmodules", "--unset", "submodule..harness/core.branch")
+        out = self.harness("init", "flutter").stdout
+        self.assertIn("branch = release", out)
+        self.assertEqual(_git(self.app, "config", "-f", ".gitmodules", "submodule..harness/core.branch"), "release")
+
+
+class UpgradeCompatibilityTest(unittest.TestCase):
+    """이전 정식 릴리스(최신 v* 태그)로 설치한 프로젝트를 지금 작업 트리로 올려도 sync 후 구성 검사가 통과한다."""
+
+    def test_upgrade_from_previous_release(self):
+        tags = subprocess.run(["git", "-C", str(TEMPLATE), "tag", "--list", "v*", "--sort=-v:refname"],
+                              capture_output=True, text=True).stdout.split()
+        if not tags:
+            self.skipTest("이전 릴리스 태그가 없다 (첫 릴리스 전)")
+        prev = tags[0]
+        p = Project()
+        try:
+            core = p.root / ".harness/core"
+            shutil.rmtree(core)
+            core.mkdir(parents=True)
+            archive = subprocess.run(["git", "-C", str(TEMPLATE), "archive", prev], capture_output=True, check=True).stdout
+            subprocess.run(["tar", "-x", "-C", str(core)], input=archive, check=True)
+            p.harness("init", "flutter")
+            p.write(".harness/rules/project.md", "---\ndescription: 내 프로젝트\n---\n# 내 프로젝트\n")
+            p.write("lib/main.dart", "void main() {}\n")
+            p.write(".harness/rules/architecture.md", '---\ndescription: 구조\npaths:\n  - "lib/**"\n---\n# 구조\n')
+            p.harness("sync")
+            self.assertEqual(p.commit("chore: 이전 릴리스로 설치", verify=False).returncode, 0)
+            # 지금 버전으로 교체 (= 업데이트 PR 이 서브모듈 포인터를 바꾼 상태)
+            shutil.rmtree(core)
+            shutil.copytree(TEMPLATE, core, ignore=shutil.ignore_patterns(".git", "__pycache__", "tests"))
+            p.harness("sync")
+            r = p.harness("check-rules", check=False)
+            self.assertEqual(r.returncode, 0, f"{prev} → 지금 업그레이드 후 구성 검사 실패\n{r.stdout}")
+            self.assertIn("내 프로젝트", (p.root / ".harness/rules/project.md").read_text())
+            self.assertEqual(p.harness("check-code", "--base", "HEAD", check=False).returncode, 0)
+        finally:
+            p.tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

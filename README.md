@@ -23,7 +23,7 @@
 10. [`harness` 명령](#10-harness-명령)
 11. [설정 — `.harness/config.json`](#11-설정--harnessconfigjson)
 12. [프로젝트에 맞게 늘리기](#12-프로젝트에-맞게-늘리기)
-13. [하네스 업데이트 (서브모듈)](#13-하네스-업데이트-서브모듈)
+13. [하네스 업데이트 (서브모듈 · 릴리스)](#13-하네스-업데이트-서브모듈--릴리스)
 14. [피드백 루프 · 측정](#14-피드백-루프--측정)
 15. [문제 해결](#15-문제-해결)
 16. [한계 · 설계 원칙](#16-한계--설계-원칙)
@@ -44,7 +44,7 @@
 | 규칙을 알아도 어긴다 (print · 토큰 로그 · 계층 위반 · 키 커밋) | 결정적 검사가 **편집 직후 · 응답 종료 전 · 커밋 전 · PR** 에서 잡는다 |
 | 위험한 명령을 실행한다 (force push · 머지 · 배포 · Secret 수정) | 실행 전 훅이 **차단(deny)** 하거나 **사용자 확인(ask)** 을 띄운다 |
 | 같은 실수를 반복한다 | `feedback` 스킬: 실수 → 검사 · 테스트 · 규칙으로 되돌리고 로그에 남긴다 |
-| 하네스를 개선해도 프로젝트마다 복사해야 한다 | 공유 부분은 **git 서브모듈** — 템플릿을 고치면 각 프로젝트에 업데이트 PR(Dependabot)이 열린다 |
+| 하네스를 개선해도 프로젝트마다 복사해야 한다 | 공유 부분은 **git 서브모듈** — 정식 릴리스(태그)가 나오면 각 프로젝트에 업데이트 PR(Dependabot)이 열리고, 프로젝트 CI 를 통과하면 사람이 머지한다 |
 
 ---
 
@@ -55,8 +55,8 @@
 mkdir -p ~/Documents/repo/my_app && cd ~/Documents/repo/my_app
 git init -b main
 
-# 2) 하네스를 서브모듈로 추가
-git submodule add https://github.com/irismake/harness-template .harness/core
+# 2) 하네스를 서브모듈로 추가 — release 브랜치 = 최신 정식 릴리스
+git submodule add -b release https://github.com/irismake/harness-template .harness/core
 
 # 3) 설치 — 진입점 · 설정 · 링크 · git 훅 · CI · dependabot 생성
 .harness/core/harness init flutter
@@ -88,7 +88,7 @@ my_app/
    └─ feedback-log.md             실수 → 재발 방지 기록
 ```
 
-그리고 `git config core.hooksPath .harness/core/githooks` (커밋 전 검사 · 커밋 메시지 검사)를 설정한다.
+그리고 `git config core.hooksPath .harness/core/githooks` (커밋 전 검사 · 커밋 메시지 검사)를 설정하고, `.gitmodules` 에 `branch = release` 가 없으면 넣는다 (`-b` 없이 추가했어도 업데이트는 정식 릴리스만 받게).
 
 **5) 에이전트를 열고 말한다**
 
@@ -107,7 +107,7 @@ claude        # 또는 codex
 
 ```sh
 cd 기존앱
-git submodule add https://github.com/irismake/harness-template .harness/core
+git submodule add -b release https://github.com/irismake/harness-template .harness/core
 .harness/core/harness init flutter
 ```
 
@@ -366,7 +366,7 @@ Codex 에는 훅이 없으므로 `core.md` 의 "사용자 승인 없이 하지 �
 | `check-code [--base R \| --staged \| --file F] [--lint]` | 변경분 코드 검사 |
 | `test <파일·폴더…>` | 관련 테스트만 (`commands.test`, `.fvmrc` 가 있으면 `fvm flutter test`). 전체는 `--all` |
 | `run <이름> [...]` | `commands` 의 명령 — `codegen`(build_runner) · `format` · `analyze` · 프로젝트가 추가한 것 |
-| `update` | 서브모듈을 최신으로 받고 sync · 구성 검사, 변경 커밋 목록 · CHANGELOG 표시. 커밋은 직접 |
+| `update` | 최신 **정식 릴리스**(`release` 브랜치)를 받고 sync · 구성 검사, 버전 변화 · 커밋 목록 · CHANGELOG 표시. 커밋은 직접 |
 | `stats [--since 2026-11-01]` | 로컬 검사 기록 집계 — 실행 위치별 통과/위반, 규칙별 위반, 차단 · 확인 이유 |
 
 ---
@@ -444,37 +444,67 @@ def lint(ctx, paths):        # 선택 — --lint 일 때
 
 ---
 
-## 13. 하네스 업데이트 (서브모듈)
+## 13. 하네스 업데이트 (서브모듈 · 릴리스)
 
-### 서브모듈은 이렇게 동작한다
+### 버전 · 릴리스
 
-- 프로젝트는 서브모듈의 **특정 커밋을 가리키는 포인터**만 저장한다.
-- 이 레포에 새 커밋을 올려도 **각 프로젝트는 자동으로 바뀌지 않는다.** 예전 커밋을 계속 쓴다.
-- 이건 장점이다. 하네스를 잘못 고쳐도 모든 프로젝트가 한꺼번에 깨지지 않고, 프로젝트마다 변경을 확인하고 받으며, CI 도 고정된 버전으로 재현된다.
+| | 뜻 |
+|---|---|
+| `VERSION` 파일 | 현재 버전 (예: `0.1.0`). 태그와 항상 같다 |
+| Git 태그 `vX.Y.Z` | 정식 릴리스 후보. push 하면 릴리스 워크플로가 돈다 |
+| `release` 브랜치 | **정식 릴리스만** 가리킨다. 릴리스 워크플로가 Template CI 를 다시 통과한 태그 커밋으로만 옮긴다 (fast-forward) |
+| `main` 의 일반 커밋 | 개발 중. 프로젝트 업데이트 대상이 **아니다** |
 
-### 받는 방법
+프로젝트 서브모듈은 `.gitmodules` 의 `branch = release` 를 따라간다 (`submodule add -b release`, 없으면 `harness init` 이 넣는다). 그래서 Dependabot 도 `harness update` 도 정식 릴리스만 본다.
 
-**자동 알림 (추천)**: init 이 넣은 `.github/dependabot.yml` 이 매주 확인해 **"chore: bump .harness/core from … to …" PR** 을 연다. CI(Harness job)가 새 하네스로 프로젝트를 검사하니, 통과하면 머지한다. 머지 후 로컬에서:
+### 전체 흐름
 
-```sh
-git pull && git submodule update && .harness/core/harness sync
+```
+하네스 변경 (템플릿 레포 PR)
+  ↓ Template CI (test.yml)            회귀 테스트 · Flutter 앱 fixture · 이전 릴리스 → 지금 업그레이드
+main 머지
+  ↓ VERSION · CHANGELOG 올리고 태그 vX.Y.Z push
+릴리스 워크플로 (release.yml)          태그 = VERSION · CHANGELOG 항목 · main 에 있는 커밋 · Template CI 재실행
+  ↓ 모두 통과하면 release 브랜치 → 태그 커밋     (하나라도 실패하면 release 는 그대로 = 배포 안 됨)
+각 프로젝트 Dependabot (매주)           release 브랜치에서 새 태그 커밋 발견 → "bump .harness/core from vA to vB" PR
+  ↓ 프로젝트 CI (ci.yml) 전체          새 하네스로 checkout(submodules: true) → harness verify · 포맷 · 분석 · 테스트 (· 빌드)
+PASS → 사람이 머지 / FAIL → 머지하지 않음 (기존 버전 유지) · 프로젝트 수정 또는 하네스 수정
 ```
 
-> 팩에 새 규칙 · 스킬이 생긴 업데이트면 링크 · AGENTS.md 표가 바뀌어야 하므로 Dependabot PR 에서 `Harness` job 이 `sync` 가 필요하다고 실패할 수 있다. 그때는 PR 브랜치를 받아 `harness sync` 후 커밋하거나, 아래 수동 방법을 쓴다.
+두 CI 는 묻는 것이 다르다.
 
-**수동**:
+| | 묻는 것 | 실패하면 |
+|---|---|---|
+| **Template CI** | "하네스 자체가 정상인가?" | 릴리스하지 않는다 |
+| **Project Update PR CI** | "이 하네스 버전을 **이 프로젝트에** 적용해도 정상인가?" | 그 프로젝트만 업데이트를 보류한다 |
+
+Template CI 통과가 모든 프로젝트의 통과를 뜻하지 않는다. 예를 들어 v1.0.3 에서 A · C 는 통과하고 B 는 새 규칙과 기존 코드가 부딪혀 실패할 수 있다. 이게 정상이다 — B 는 업데이트 PR 을 머지하지 않고 기존 버전을 쓴다.
+
+### 자동 적용 없음
+
+- Dependabot 설정 · 워크플로 어디에도 자동 머지가 없다. 업데이트는 항상 **PR → 프로젝트 CI → 사람이 머지**.
+- 서브모듈은 커밋을 고정한다. 템플릿 `main` 이나 `release` 가 바뀌어도 프로젝트가 쓰는 하네스는 업데이트 PR 을 머지하기 전까지 그대로다.
+- 브랜치 보호에서 `Harness` · `Flutter` job 을 Required check 로 지정하면 실패한 업데이트 PR 은 머지 버튼 자체가 막힌다 (GitHub 설정 — 사용자가 한다).
+
+### 업데이트 PR 을 받았을 때
+
+- 통과: 변경 내역(PR 본문 · `CHANGELOG.md`)을 보고 머지 → 로컬에서 `git pull && git submodule update && .harness/core/harness sync`
+- `Harness` job 이 **"링크가 없습니다 / AGENTS.md 표가 원본과 다릅니다"** 로 실패: 새 버전에 규칙 · 스킬이 추가됐다. PR 브랜치를 받아 `git submodule update && .harness/core/harness sync` 후 커밋 · push → CI 재실행
+- 새 규칙 · 검사에 기존 코드가 걸려 실패: 머지하지 않는다. 프로젝트 코드를 고치거나, 하네스 쪽이 틀렸으면 템플릿 레포에 이슈
+
+### 수동으로 받기
 
 ```sh
-.harness/core/harness update    # 최신 받기 + 변경 내역 + sync + 구성 검사
-git add .harness/core .claude AGENTS.md && git commit -m "chore: 하네스 업데이트"
+.harness/core/harness update    # release 브랜치의 최신 정식 릴리스 받기 + 버전 · 변경 내역 + sync + 구성 검사
+git add .harness/core .claude AGENTS.md && git commit -m "chore: 하네스 업데이트"   # PR 로 올려 CI 를 거친다
 ```
-
-`update` 는 `CHANGELOG.md` 의 변경을 보여 준다. "할 일" 이 적힌 변경(예: 새 설정 키)은 그대로 반영한다. init 은 있는 파일을 덮어쓰지 않으므로, 템플릿 파일(`ci.yml` 등)이 바뀐 경우도 CHANGELOG 를 보고 직접 옮긴다.
 
 ### 주의
 
-- 프로젝트 안의 `.harness/core` 에서 고치지 않는다 (훅이 막고 `check-rules` 가 실패). 고칠 게 있으면 이 레포를 따로 클론해 고치고 push → 프로젝트에서 `update`.
-- 특정 버전에 고정하고 싶으면 `cd .harness/core && git checkout <태그|커밋>` 후 프로젝트에서 포인터를 커밋한다.
+- 프로젝트 안의 `.harness/core` 에서 고치지 않는다 (훅이 막고 `check-rules` 가 실패). 템플릿 레포에서 고쳐 릴리스한다.
+- init 은 있는 파일을 덮어쓰지 않으므로, 템플릿 파일(`ci.yml` 등)이 바뀐 릴리스는 CHANGELOG 의 "할 일" 을 보고 직접 옮긴다.
+- 특정 릴리스에 고정: `git -C .harness/core checkout v0.1.0` 후 포인터 커밋. Dependabot PR 은 닫거나 `ignore` 설정.
+- 릴리스 방법(관리자)은 [CONTRIBUTING.md](CONTRIBUTING.md#릴리스).
 
 ---
 
@@ -555,15 +585,17 @@ $ .harness/core/harness stats
 고치는 방법 · 기준은 [CONTRIBUTING.md](CONTRIBUTING.md), 변경 내역은 [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
-python3 -m unittest discover -s tests -v   # 임시 프로젝트에 설치해 끝까지 — Flutter 불필요, 약 15초
+python3 -m unittest discover -s tests -v   # 임시 프로젝트에 설치해 끝까지 — Flutter 불필요, 약 20초
+bash tests/flutter_fixture.sh               # 실제 Flutter 앱 fixture — flutter 필요, 1~2분
 ```
 
 ### 0.1.0 검증 기록 (2026-11-20)
 
 | 항목 | 방법 | 결과 |
 |---|---|---|
-| 회귀 테스트 18개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 | ✅ (Python 3.9) |
+| 회귀 테스트 22개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 | ✅ (Python 3.9) |
 | 실제 Flutter 앱 | 서브모듈 추가 → init → fvm 3.35.0 · `flutter create` → 린트 템플릿 · Riverpod · go_router · logger · mocktail → 골격 · 규칙 · layers → `harness test` · `run analyze` · `verify` | ✅ 테스트 통과 · 분석 0건 · verify 통과 · `flutter create` 가 `.gitignore` · `AGENTS.md` 를 덮어쓰지 않음 |
 | 위반 검출 (실제 앱) | domain 에 `material.dart` import · `print` · 포맷 깨짐 | ✅ `layer` · `logging` · `dart-format` · `analyze-warning` · `analyze-info` |
 | Claude 규칙 · 스킬 · 역할 로드 | 헤드리스 세션 기록 (Claude Code 2.1.322 · 2.1.328) | ✅ 시작 시 `CLAUDE.md` · `core.md` · `project.md`, `lib/main.dart` 를 읽으면 `architecture.md` · `flutter.md` 추가 (`testing.md` 는 안 읽힘 — 의도대로). 스킬 5 · 역할 2 등록. (2.1.328 은 임시 폴더에서 링크 없는 `CLAUDE.md` 도 읽지 않아 — 폴더 신뢰 · 경로 요인 — 규칙 로드는 2.1.322 로 확인, 스킬 · 역할 등록은 두 버전 모두 확인) |
+| Flutter 팩 fixture (`tests/flutter_fixture.sh`) | init → `flutter create` 가 진입점을 덮어쓰지 않음 → verify 통과 → 위반 7종 검출 → 원복 후 통과 → `harness test` · `flutter analyze` | ✅ |
 | Codex | 이 머신에 Codex CLI 가 없어 실행 확인 못 함 | ⚠️ `AGENTS.md` 생성 · 링크만 정적 확인 |

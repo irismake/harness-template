@@ -1,0 +1,56 @@
+# 릴리스 — 태그 vX.Y.Z 를 push 하면, Template CI 를 다시 통과한 경우에만 release 브랜치를 그 커밋으로 옮긴다.
+#
+#   main 의 일반 커밋 = 개발 중 (프로젝트 업데이트 대상 아님)
+#   release 브랜치가 가리키는 태그 커밋 = 정식 릴리스
+#
+# 프로젝트 서브모듈은 .gitmodules branch = release 를 따라가므로 Dependabot · harness update 는 정식 릴리스만 본다.
+# 조건 중 하나라도 실패하면 release 브랜치는 움직이지 않는다 (태그만 남고 배포되지 않음 → 태그를 지우고 고쳐서 다시).
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Release 조건
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 태그 = VERSION · CHANGELOG 항목 · main 에 있는 커밋
+        run: |
+          version="$(cat VERSION)"
+          test "v${version}" = "${GITHUB_REF_NAME}" || { echo "::error::태그 ${GITHUB_REF_NAME} 와 VERSION ${version} 이 다르다"; exit 1; }
+          grep -q "^## ${version} " CHANGELOG.md || { echo "::error::CHANGELOG.md 에 '## ${version} ' 항목이 없다"; exit 1; }
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main || { echo "::error::태그 커밋이 main 에 없다"; exit 1; }
+          if git rev-parse -q --verify origin/release >/dev/null; then
+            git merge-base --is-ancestor origin/release "${GITHUB_SHA}" || { echo "::error::release 보다 오래된 커밋이다 (되돌리는 릴리스는 하지 않는다)"; exit 1; }
+          fi
+
+  test:
+    name: Template CI
+    needs: check
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    name: release 브랜치 이동
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: release → ${{ github.ref_name }}
+        run: |
+          git push origin "${GITHUB_SHA}:refs/heads/release"
+          echo "정식 릴리스 ${GITHUB_REF_NAME} (${GITHUB_SHA::7}) — 프로젝트 Dependabot 이 다음 확인 때 업데이트 PR 을 연다" >> "$GITHUB_STEP_SUMMARY"

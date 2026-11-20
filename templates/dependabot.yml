@@ -1,5 +1,11 @@
 # 하네스(.harness/core 서브모듈) · GitHub Actions 업데이트를 PR 로 알려 준다.
-# 하네스 업데이트 PR 은 CI(하네스 검사)를 통과하는지 보고 머지한다. 머지 후 로컬: git submodule update && .harness/core/harness sync
+#
+# 하네스: 서브모듈은 .gitmodules 의 branch = release 를 따라간다 (harness init 이 설정).
+#   release 브랜치는 하네스 템플릿의 릴리스 워크플로가 CI 를 통과한 태그(vX.Y.Z) 커밋으로만 옮긴다.
+#   → main 의 개발 커밋은 업데이트 대상이 아니고, 새 정식 릴리스가 나오면 "bump .harness/core" PR 이 열린다.
+# 업데이트 PR 은 프로젝트 CI(.github/workflows/ci.yml)를 새 하네스로 다시 돈다. 통과를 확인하고 사람이 머지한다.
+# 자동 머지는 쓰지 않는다 (이 파일 · 워크플로 어디에도 auto-merge 설정이 없다).
+# 머지 후 로컬: git pull && git submodule update && .harness/core/harness sync
 version: 2
 updates:
   - package-ecosystem: gitsubmodule
