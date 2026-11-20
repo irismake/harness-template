@@ -1,0 +1,25 @@
+# 템플릿 레포 자체 검사 — 임시 프로젝트에 하네스를 설치해 init · sync · 검사 · 훅을 끝까지 돌린다.
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Harness template
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 문법
+        run: python -m py_compile scripts/*.py scripts/hooks/*.py packs/*/checks.py githooks/commit-msg
+      - name: 회귀 테스트
+        run: python -m unittest discover -s tests -v
