@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# 에이전트 작업의 완료 조건 (Claude · Codex 공통). 사람이 직접 하는 push 는 대상이 아니다.
+#   모든 규모: 지금 코드로 harness verify 통과 / L 규모: reviewer PASS + 리뷰 뒤 소스 불변 + 관련 테스트 통과 기록
+# 통과하면 작업 공간을 정리하고 사용량을 집계한다. (scripts/work.py)
+cd "$(git rev-parse --show-toplevel)"
+[ -f .harness/core/scripts/work.py ] || exit 0
+exec python3 .harness/core/scripts/work.py pre-push "$@"

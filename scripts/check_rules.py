@@ -10,7 +10,7 @@
   4. 규칙: description 이 있다. paths 없는 규칙은 always_loaded_rules 에 든 것만.
      프로젝트 규칙은 paths 중 하나 이상이 실제 파일에 맞는다 (경로 변경 감지)
   5. 역할: name(=파일명) · description · tools / 스킬: name(=폴더명) · description
-  6. AGENTS.md 표가 원본에서 생성한 것과 같다 / CLAUDE.md 가 있다
+  6. AGENTS.md 표가 원본에서 생성한 것과 같다 / CLAUDE.md 가 있다 / .claude/settings.json 의 하네스 훅이 이 버전과 같다
   7. 공유 하네스(.harness/core)를 프로젝트 안에서 고치지 않았다
 고치는 방법: 대부분 `.harness/core/harness sync`
 """
@@ -76,6 +76,8 @@ def main():
             problems.append(f"스킬 {name}: name 이 폴더명과 다릅니다 ({fields['name']})")
 
     if p := sync.agents_md_problem(cfg):
+        problems.append(p)
+    if p := sync.settings_problem():
         problems.append(p)
     if not (ROOT / "CLAUDE.md").exists():
         problems.append("CLAUDE.md 가 없습니다 (`harness init`)")

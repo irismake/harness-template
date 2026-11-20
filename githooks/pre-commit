@@ -12,6 +12,9 @@ fi
 
 python3 "$core/check_code.py" --staged --lint
 
+# 에이전트(Codex 등 훅이 없는 도구)가 한 커밋이면 작업 구간을 연다 — 완료 조건은 pre-push 가 확인한다
+python3 "$core/work.py" ensure --source git-commit >/dev/null 2>&1 || true
+
 # 하네스 구성 · 진입점을 바꿨으면 구성 검사
 if git diff --cached --name-only | grep -qE '^(\.harness/|\.claude/|AGENTS\.md|CLAUDE\.md)'; then
   python3 "$core/check_rules.py"

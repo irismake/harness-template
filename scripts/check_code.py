@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import events  # noqa: E402
 import tdd  # noqa: E402
 import traceability as trace_check  # noqa: E402
-from lib import ROOT, git, glob_regex, load_checks, load_config  # noqa: E402
+from lib import LOCAL_DIRS, ROOT, git, glob_regex, load_checks, load_config  # noqa: E402
 
 SECRET_VALUE_RES = [
     ("개인 키", re.compile(r"-----BEGIN (RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----")),
@@ -164,7 +164,8 @@ def main():
 
     added, new = changes(args)
     # 생성물 · 서브모듈 포인터는 보지 않는다
-    added = {p: l for p, l in added.items() if not p.startswith((".harness/core", ".claude/"))}
+    added = {p: l for p, l in added.items() if not p.startswith((".harness/core", ".claude/", *LOCAL_DIRS))}
+    new = {p for p in new if not p.startswith(LOCAL_DIRS)}
     ctx = Context(cfg, added, new)
     core_checks(ctx)
     mode = "staged" if args.staged else "file" if args.file else "base"

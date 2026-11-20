@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib import CONFIG_PATH, CORE, ROOT  # noqa: E402
+from lib import CONFIG_PATH, CORE, ROOT, load_config  # noqa: E402
 
 
 def run(*args):
@@ -30,6 +30,11 @@ def main():
         run(str(CORE / "scripts/check_code.py"), "--lint"),
     ]
     failed = [r for r in results if r.returncode != 0]
+    try:  # 종료 전 검사 = harness verify 와 같다 → 완료 게이트의 증거로 남긴다
+        import work
+        work.record_verify(load_config(), not failed)
+    except Exception:  # noqa: BLE001 — 기록 실패가 응답을 막으면 안 된다
+        pass
     if not failed:
         return
     report = "\n".join((r.stdout + r.stderr).strip() for r in failed)

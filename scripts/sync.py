@@ -16,6 +16,8 @@ import os
 import re
 from pathlib import Path
 
+import json
+
 from lib import CORE, HARNESS, ROOT, front_matter, pack_dir
 
 START = "<!-- harness:start"
@@ -154,8 +156,11 @@ def agents_block(cfg):
     for name, src in agent_sources(cfg).items():
         fields, _ = front_matter(src.read_text())
         agent_rows.append(f"| [`{name}`]({_rel(src)}) | {_cell(fields.get('description'))} |")
+    codex = (CORE / "templates/codex-rules.md").read_text().strip().splitlines()
     lines = [
         f"{START} — `.harness/core/harness sync` 가 생성한다. 이 블록은 직접 고치지 않는다 -->",
+        *codex,
+        "",
         "### 항상 읽는 규칙",
         "",
         *always_rows,
@@ -204,5 +209,48 @@ def apply_agents_md(cfg):
     new = BLOCK_RE.sub(lambda _: agents_block(cfg), text) if BLOCK_RE.search(text) else text.rstrip() + "\n\n" + agents_block(cfg) + "\n"
     if new != text:
         path.write_text(new)
+        return True
+    return False
+
+
+# ── .claude/settings.json 의 하네스 훅 ────────────────────
+# init 은 settings 를 한 번만 복사한다. 하네스 업데이트로 훅이 늘거나 바뀌면 sync 가 하네스 항목만 템플릿에 맞춘다.
+# 하네스 항목 = command 에 ".harness/core/scripts/hooks/" 가 든 것. 프로젝트가 추가한 훅 · 권한 · 다른 설정은 그대로 둔다.
+SETTINGS = CLAUDE / "settings.json"
+HOOK_MARK = ".harness/core/scripts/hooks/"
+
+
+def _is_harness_entry(entry):
+    return any(HOOK_MARK in (h.get("command") or "") for h in entry.get("hooks", []))
+
+
+def desired_settings():
+    template = json.loads((CORE / "templates/claude-settings.json").read_text())["hooks"]
+    try:
+        current = json.loads(SETTINGS.read_text())
+    except (OSError, ValueError):
+        current = {}
+    hooks = {k: [e for e in v if not _is_harness_entry(e)] for k, v in (current.get("hooks") or {}).items()}
+    for event, entries in template.items():
+        hooks[event] = hooks.get(event, []) + entries
+    out = dict(current)
+    out["hooks"] = {k: v for k, v in hooks.items() if v}
+    return current, out
+
+
+def settings_problem():
+    if not SETTINGS.exists():
+        return ".claude/settings.json 이 없습니다 (`harness init`)"
+    current, desired = desired_settings()
+    if current != desired:
+        return ".claude/settings.json 의 하네스 훅이 이 하네스 버전과 다릅니다"
+    return None
+
+
+def apply_settings():
+    current, desired = desired_settings()
+    if current != desired:
+        SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text(json.dumps(desired, ensure_ascii=False, indent=2) + "\n")
         return True
     return False

@@ -9,6 +9,7 @@
   check-code [...]   변경분 코드 검사 (--base · --staged · --file · --lint)
   test <대상>        관련 테스트만 실행 (config commands.test). 전체는 --all (보통 CI 가 한다)
   tdd status|skip|ci  TDD Guard 상태 · 예외(사용자 승인) · CI 의 RED 재현 검사
+  work current|lane  작업 구간 (자동 시작 · 자동 종료) — 지금 작업의 산출물 경로 · 규모 · 라운드, 규모 선언
   trace [ID]         요구사항 추적 검사 · REQ/시나리오 하나의 연결(→ 시나리오 → 테스트 위치) 보기
   run <이름> [...]   config commands 의 명령 실행 (예: run codegen · run format · run analyze)
   update             공유 하네스(서브모듈)를 최신으로 받고 sync — 변경 내역을 보여 준다. 커밋은 직접
@@ -26,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sync  # noqa: E402
 import tdd  # noqa: E402
+import work  # noqa: E402
 from lib import CONFIG_PATH, CORE, HARNESS, ROOT, git, load_checks, load_config, pack_dir  # noqa: E402
 
 SCRIPTS = CORE / "scripts"
@@ -126,6 +128,7 @@ def cmd_init(args):
     cfg = load_config()
     links = sync.apply_links(cfg)
     sync.apply_agents_md(cfg)
+    sync.apply_settings()
     hooks = os.path.relpath(CORE / "githooks", ROOT)
     git("config", "core.hooksPath", hooks)
     for f in (CORE / "githooks").iterdir():
@@ -144,15 +147,17 @@ def cmd_sync(_):
     cfg = load_config()
     changed = sync.apply_links(cfg)
     md = sync.apply_agents_md(cfg) if (ROOT / "AGENTS.md").exists() else False
+    st = sync.apply_settings()
     for c in changed:
         print(c)
-    print(f"✓ sync: 링크 변경 {len(changed)}개{' · AGENTS.md 표 갱신' if md else ''}")
+    print(f"✓ sync: 링크 변경 {len(changed)}개{' · AGENTS.md 표 갱신' if md else ''}{' · .claude/settings.json 하네스 훅 갱신' if st else ''}")
 
 
 def cmd_verify(args):
     code = py("check_rules.py", source="verify")
     extra = ["--base", args.base] if args.base else []
     code |= py("check_code.py", "--lint", *extra, source="verify")
+    work.record_verify(load_config(), code == 0)
     if code == 0:
         print("✓ verify 통과 (빌드 · 전체 테스트는 CI 가 한다)")
     sys.exit(code)
@@ -172,22 +177,28 @@ def cmd_test(args):
     runner = next((m.run_tests for m in reversed(load_checks(cfg)) if hasattr(m, "run_tests")), None)
     if runner:  # 팩이 결과를 구조화해 주면 TDD Guard 기록을 남긴다
         targets = [] if args.all else args.target
+        if work.is_agent_env():
+            work.ensure("test")
         results = runner(ROOT, targets)
         tdd.record_run(cfg, results)
+        work.record_tests(cfg, results)
         counts = {s: sum(1 for v in results.values() if v == s) for s in ("pass", "fail", "load_error")}
         print(f"테스트 파일 {len(results)}개: 통과 {counts['pass']} · 실패 {counts['fail']} · 컴파일 실패 {counts['load_error']}"
               + (" (TDD 기록 저장)" if tdd.enabled(cfg) else ""))
         sys.exit(0 if results and all(v == "pass" for v in results.values()) else 1)
-    run_shell(cfg, cmd)
+    run_shell(cfg, cmd, record_test=True)
 
 
-def run_shell(cfg, cmd):
+def run_shell(cfg, cmd, record_test=False):
     for m in load_checks(cfg):
         if hasattr(m, "command_vars"):
             for k, v in m.command_vars(ROOT).items():
                 cmd = cmd.replace("{" + k + "}", v)
     print(f"$ {cmd}")
-    sys.exit(subprocess.run(cmd, shell=True, cwd=ROOT).returncode)
+    code = subprocess.run(cmd, shell=True, cwd=ROOT).returncode
+    if record_test:
+        work.record_tests(cfg, None, code)
+    sys.exit(code)
 
 
 def cmd_run(args):
@@ -263,11 +274,14 @@ def main():
     p.add_argument("extra", nargs="*")
     sub.add_parser("tdd", add_help=False)
     sub.add_parser("trace", add_help=False)
+    sub.add_parser("work", add_help=False)
     sub.add_parser("update")
     p = sub.add_parser("stats")
     p.add_argument("--since")
 
     argv = sys.argv[1:]
+    if argv[:1] == ["work"]:
+        sys.exit(py("work.py", *argv[1:]))
     if argv[:1] == ["trace"]:
         sys.exit(py("traceability.py", *argv[1:]))
     if argv[:1] == ["tdd"]:
