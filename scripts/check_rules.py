@@ -8,7 +8,7 @@
   2. .claude/{rules,agents,skills} 링크가 원본과 일치한다 — 빠진 링크 · 끊긴 링크 · 사본 없음
   3. 다른 도구용 규칙 사본(.codex/rules · .cursor · .cursorrules)이 없다
   4. 규칙: description 이 있다. paths 없는 규칙은 always_loaded_rules 에 든 것만.
-     프로젝트 규칙의 paths 는 실제 파일에 하나 이상 맞는다 (경로 변경 감지)
+     프로젝트 규칙은 paths 중 하나 이상이 실제 파일에 맞는다 (경로 변경 감지)
   5. 역할: name(=파일명) · description · tools / 스킬: name(=폴더명) · description
   6. AGENTS.md 표가 원본에서 생성한 것과 같다 / CLAUDE.md 가 있다
   7. 공유 하네스(.harness/core)를 프로젝트 안에서 고치지 않았다
@@ -54,10 +54,10 @@ def main():
             continue
         if src.name in always:
             problems.append(f"규칙 {label}: 항상 로드되는 규칙에 paths 가 있습니다")
-        if group == "project":
-            for pattern in paths:
-                if not any(glob_regex(pattern).match(f) for f in tracked):
-                    problems.append(f"규칙 {label}: paths '{pattern}' 에 맞는 파일이 없습니다")
+        # 프로젝트 규칙은 paths 중 하나 이상이 실제 파일에 맞아야 한다 (폴더 이름이 바뀌어 아무 데서도 로드되지 않는 규칙 감지).
+        # 아직 없는 폴더(첫 기능 전의 data/ 등)를 미리 적는 것은 허용한다.
+        if group == "project" and not any(glob_regex(p).match(f) for p in paths for f in tracked):
+            problems.append(f"규칙 {label}: paths ({', '.join(paths)}) 에 맞는 파일이 하나도 없습니다")
 
     for name, src in sync.agent_sources(cfg).items():
         fields, _ = front_matter(src.read_text())

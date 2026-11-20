@@ -96,5 +96,20 @@
   },
   "init_files": {
     "templates/ci.yml": ".github/workflows/ci.yml"
-  }
+  },
+  "gitignore": [
+    ".dart_tool/",
+    "build/",
+    ".flutter-plugins",
+    ".flutter-plugins-dependencies",
+    ".pub-cache/",
+    ".pub/",
+    "/coverage/",
+    "*.iml",
+    ".idea/",
+    ".DS_Store",
+    ".fvm/",
+    "env/*.json",
+    "!env/*.example.json"
+  ]
 }

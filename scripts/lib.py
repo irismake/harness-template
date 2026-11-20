@@ -146,7 +146,8 @@ def git(*args, cwd=None, check=True):
 
 
 def tracked_files():
-    return git("ls-files", check=False).split("\n")
+    """커밋된 파일 + 아직 add 하지 않은 새 파일 (gitignore 제외)"""
+    return [f for f in git("ls-files", "--cached", "--others", "--exclude-standard", check=False).split("\n") if f]
 
 
 def glob_regex(pattern):

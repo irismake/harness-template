@@ -86,7 +86,7 @@ def cmd_init(args):
 
     gi = ROOT / ".gitignore"
     lines = gi.read_text().splitlines() if gi.exists() else []
-    missing = [l for l in GITIGNORE if l not in lines]
+    missing = [l for l in GITIGNORE + pack_meta.get("gitignore", []) if l not in lines]
     if missing:
         gi.write_text("\n".join(lines + ["", "# harness", *missing]).lstrip("\n") + "\n")
         created.append(".gitignore (하네스 항목)")
