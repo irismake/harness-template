@@ -456,5 +456,148 @@ class ReleaseScriptTest(unittest.TestCase):
         self.assertEqual(self.show("VERSION"), "0.1.0", "dry-run 은 push 하지 않는다")
 
 
+FAKE_RUNNER = """
+import re
+from pathlib import Path
+
+
+def run_tests(root, targets):
+    # 가짜 실행기: 테스트의 'EXPECT <파일> <문자열>' — 파일이 없으면 load_error, 문자열이 없으면 fail
+    root = Path(root)
+    files = targets or [p.relative_to(root).as_posix() for p in (root / "test").rglob("*_test.dart")]
+    out = {}
+    for t in files:
+        status = "pass"
+        for src, token in re.findall(r"EXPECT (\\S+) (\\S+)", (root / t).read_text()):
+            if not (root / src).exists():
+                status = "load_error"
+                break
+            if token not in (root / src).read_text():
+                status = "fail"
+        out[t] = status
+    return out
+
+
+def prepare(root):
+    pass
+"""
+
+CHAT = "lib/features/chat/domain/chat.dart"
+CHAT_TEST = "test/features/chat/domain/chat_test.dart"
+PAY = "lib/features/pay/domain/pay.dart"
+
+
+class TddGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.write("pubspec.yaml", "name: my_app\n")
+        self.p.write(".harness/checks.py", FAKE_RUNNER)
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["tdd"] = {"enabled": True, "paths": ["lib/features/**/domain/**"]}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write(PAY, "int pay() => 1;\n")
+        self.assertEqual(self.p.commit("chore: 설치", verify=False).returncode, 0)
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def edit(self, rel):
+        return self.p.decision({"tool_name": "Write", "tool_input": {"file_path": str(self.p.root / rel)}})
+
+    def test(self, *targets):
+        return self.p.harness("test", *targets, check=False)
+
+    def write_chat_test(self, token="send"):
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} {token}\nimport 'package:my_app/features/chat/domain/chat.dart';\n")
+
+    def tdd_problems(self):
+        out = self.p.harness("check-code", "--base", "HEAD", check=False).stdout
+        return [l for l in out.splitlines() if "[tdd]" in l]
+
+    def test_disabled_guard_allows_everything(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["tdd"]["enabled"] = False
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.assertEqual(self.edit(CHAT), "allow")
+        self.p.write(CHAT, "x")
+        self.assertEqual(self.tdd_problems(), [])
+
+    def test_full_cycle(self):
+        # ① 테스트 없이 기능 코드 → 차단, 테스트 · 대상 밖 파일은 허용
+        self.assertEqual(self.edit(CHAT), "deny")
+        self.assertEqual(self.edit(CHAT_TEST), "allow")
+        self.assertEqual(self.edit("lib/features/chat/presentation/chat_screen.dart"), "allow")
+        # ② 테스트 작성 → 실행 → 컴파일 실패 RED → 잠금 해제
+        self.write_chat_test()
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.edit(CHAT), "allow")
+        # ③ 골격만 → 완료 아님 (컴파일 실패만 봤다)
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertTrue(any("컴파일 실패(RED)만" in l for l in self.tdd_problems()), self.tdd_problems())
+        # ④ 골격 상태로 실행 → behavior RED → 구현 → GREEN → 완료
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertTrue(any("RED 뒤 GREEN 이 없다" in l for l in self.tdd_problems()))
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+        # ⑤ GREEN 뒤에 코드가 바뀌면 다시 확인해야 한다
+        self.p.write(CHAT, "void send() {}\n// 바뀜\n")
+        self.assertTrue(any("GREEN 이후" in l for l in self.tdd_problems()))
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+        # ⑥ 커밋 (pre-commit 통과) → 기록 초기화 → 다음 변경은 다시 RED 필요
+        self.assertEqual(self.p.commit("feat: 채팅 보내기").returncode, 0)
+        self.assertEqual(self.edit(CHAT), "deny")
+
+    def test_red_of_other_feature_does_not_unlock(self):
+        self.write_chat_test()
+        self.test(CHAT_TEST)
+        self.assertEqual(self.edit(CHAT), "allow")
+        self.assertEqual(self.edit(PAY), "deny")
+
+    def test_commit_blocked_without_cycle(self):
+        self.p.write(PAY, "int pay() => 2;\n")  # 훅 밖(셸 등)에서 고쳤다고 가정
+        r = self.p.commit("fix: 결제")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("[tdd]", r.stdout + r.stderr)
+
+    def test_skip_needs_approval_and_is_bound_to_content(self):
+        self.assertEqual(self.p.decision({"tool_name": "Bash", "tool_input": {"command": ".harness/core/harness tdd skip lib/x.dart --reason r"}}), "ask")
+        self.assertEqual(self.edit(".harness/tdd-skip.json"), "ask")
+        self.p.harness("tdd", "skip", PAY, "--reason", "리팩토링 — 동작 변화 없음")
+        self.assertEqual(self.edit(PAY), "allow")
+        self.assertEqual(self.tdd_problems(), [])
+        self.p.write(PAY, "int pay() => 3;\n")
+        self.assertTrue(any(PAY in l for l in self.tdd_problems()), "내용이 바뀌면 예외가 무효")
+
+    def test_ci_reproduces_red_on_base(self):
+        base = _git(self.p.root, "rev-parse", "HEAD")
+        self.p.write(CHAT, "void send() {}\n")
+        self.write_chat_test("receive")
+        self.p.write(CHAT, "void send() {}\nvoid receive() {}\n")
+        self.assertEqual(self.p.commit("feat: 받기", verify=False).returncode, 0)
+        r = self.p.harness("tdd", "ci", "--base", base, check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RED 재현", r.stdout)
+
+    def test_ci_rejects_test_that_passes_before_change(self):
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.p.commit("chore: 기존 코드", verify=False).returncode, 0)
+        base = _git(self.p.root, "rev-parse", "HEAD")
+        self.write_chat_test("send")  # 이미 있는 동작 — 변경 전에도 통과
+        self.p.write(CHAT, "void send() {}\n// 바꿈\n")
+        self.p.commit("feat: 가짜 TDD", verify=False)
+        out = self.p.harness("tdd", "ci", "--base", base, check=False).stdout
+        self.assertIn("변경 전 코드에서도 통과", out)
+
+    def test_ci_rejects_source_change_without_test(self):
+        base = _git(self.p.root, "rev-parse", "HEAD")
+        self.p.write(PAY, "int pay() => 9;\n")
+        self.p.commit("fix: 결제", verify=False)
+        out = self.p.harness("tdd", "ci", "--base", base, check=False).stdout
+        self.assertIn("연결된 테스트 변경이 없다", out)
+
+
 if __name__ == "__main__":
     unittest.main()
