@@ -14,7 +14,7 @@
 | 역할 · 스킬 | `agents/` · `skills/` · `packs/<팩>/skills/` | 이름 = 파일 · 폴더 이름 |
 | 결정적 검사 | `scripts/check_code.py`(공통) · `packs/<팩>/checks.py` | 추가된 줄만 본다. 오탐이 없는지 실제 프로젝트에서 확인 |
 | 차단 · 확인 패턴 | `scripts/lib.py` `DEFAULTS` · `packs/<팩>/pack.json` `protected` | 읽기 명령을 막지 않는지 (예: `grep fastlane`) |
-| 프로젝트에 깔리는 파일 | `templates/` · `packs/<팩>/templates/` · `pack.json` `init_files` | init 은 있는 파일을 덮어쓰지 않는다 → 기존 프로젝트에는 CHANGELOG 로 안내 |
+| 프로젝트에 깔리는 파일 | `templates/` · `packs/<팩>/templates/` · `pack.json` `init_files` | init 은 있는 파일을 덮어쓰지 않는다 → 기존 프로젝트에는 PR 제목(→ CHANGELOG)으로 안내 |
 
 ## 확인
 
@@ -29,19 +29,15 @@ PR 의 Template CI(`.github/workflows/test.yml`)가 둘 다 돌린다.
 
 ## 릴리스
 
-`main` 머지만으로는 프로젝트에 퍼지지 않는다. **태그 + release 브랜치**가 정식 릴리스다.
+**자동**이다. 사람이 하는 일은 PR 제목을 Conventional Commit 으로 쓰고 Squash 머지하는 것뿐이다.
 
-1. `main` 의 Template CI(`Test`)가 통과한 상태에서
-2. `VERSION` 을 올리고 `CHANGELOG.md` 에 `## X.Y.Z — 날짜` 항목(변경 · 프로젝트가 할 일)을 쓴 커밋을 `main` 에 머지한다.
-3. 그 커밋에 태그를 붙여 push 한다.
+1. PR 제목: `<type>: <요약>` — Squash 커밋 제목이 되고, 자동 릴리스가 이것으로 버전을 정한다. Template CI 가 형식을 검사한다.
+   - `feat` → minor · `fix` `perf` `refactor` `ci` `build` `revert` → patch · `docs` `chore` `test` `style` → 릴리스 없음 · `!` / `BREAKING CHANGE` → major
+   - 프로젝트가 직접 해야 할 일(설정 키 추가 · 템플릿 파일 변경 옮기기)이 있으면 PR 제목에 드러나게 쓴다 (CHANGELOG 가 제목으로 만들어진다).
+2. Template CI 통과 → Squash 머지.
+3. `main` push 의 Template CI 가 통과하면 `.github/workflows/release.yml` → `scripts/release.py` 가 지난 릴리스 이후 커밋을 분석해 `release` 브랜치에 릴리스 커밋(`VERSION` · `CHANGELOG.md`)과 태그를 만든다. `main` 은 건드리지 않는다.
+4. 각 프로젝트의 Dependabot 이 업데이트 PR 을 연다 → 프로젝트 CI → 사람이 머지.
 
-   ```sh
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
-
-4. 릴리스 워크플로(`.github/workflows/release.yml`)가 확인한다: 태그 = `VERSION` · CHANGELOG 항목 · `main` 에 있는 커밋 · 현재 `release` 보다 새 커밋 · **Template CI 재실행 통과**. 모두 통과하면 `release` 브랜치를 그 커밋으로 옮긴다.
-5. 각 프로젝트의 Dependabot 이 다음 확인 때 업데이트 PR 을 연다 → 프로젝트 CI → 사람이 머지.
-
-실패하면 `release` 는 움직이지 않는다. 고친 뒤 태그를 지우고(`git push origin :refs/tags/vX.Y.Z`) 다시 붙이거나 다음 버전으로 낸다.
-
-버전 규칙: 규칙 · 검사가 **더 엄격해져** 기존 프로젝트가 실패할 수 있으면 minor 이상, 문서 · 오탐 수정은 patch. 설정 키 · 규칙 파일 이름 변경처럼 프로젝트를 깨뜨리는 변경은 피하고, 꼭 필요하면 옛 이름도 한동안 읽게 한다.
+- 미리 보기: `python3 scripts/release.py --main origin/main --dry-run`
+- 수동 릴리스(예: docs 만 바뀌었지만 내보내고 싶다): Actions → Release → Run workflow (`bump` 선택). Template CI 를 다시 돌린 뒤 릴리스한다.
+- 버전 규칙: 규칙 · 검사가 **더 엄격해져** 기존 프로젝트가 실패할 수 있으면 `feat`(minor) 이상, 오탐 수정 · 문서는 `fix` · `docs`. 설정 키 · 규칙 파일 이름 변경처럼 프로젝트를 깨뜨리는 변경은 피하고, 꼭 필요하면 `!` 를 붙이고 옛 이름도 한동안 읽게 한다.
