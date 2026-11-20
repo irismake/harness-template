@@ -8,6 +8,7 @@
   check-rules        하네스 구성 검사
   check-code [...]   변경분 코드 검사 (--base · --staged · --file · --lint)
   test <대상>        관련 테스트만 실행 (config commands.test). 전체는 --all (보통 CI 가 한다)
+  run <이름> [...]   config commands 의 명령 실행 (예: run codegen · run format · run analyze)
   update             공유 하네스(서브모듈)를 최신으로 받고 sync — 변경 내역을 보여 준다. 커밋은 직접
   stats [--since D]  로컬 검사 기록(.harness/out/events.jsonl) 집계
 """
@@ -22,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sync  # noqa: E402
-from lib import CONFIG_PATH, CORE, HARNESS, ROOT, git, load_config, pack_dir  # noqa: E402
+from lib import CONFIG_PATH, CORE, HARNESS, ROOT, git, load_checks, load_config, pack_dir  # noqa: E402
 
 SCRIPTS = CORE / "scripts"
 TEMPLATES = CORE / "templates"
@@ -136,8 +137,24 @@ def cmd_test(args):
         sys.exit("테스트 대상을 지정하세요 (파일 · 폴더). 전체 테스트는 CI 가 한다 — 꼭 필요하면 --all")
     if not cmd:
         sys.exit("config.json 의 commands.test 가 없습니다.")
+    run_shell(cfg, cmd)
+
+
+def run_shell(cfg, cmd):
+    for m in load_checks(cfg):
+        if hasattr(m, "command_vars"):
+            for k, v in m.command_vars(ROOT).items():
+                cmd = cmd.replace("{" + k + "}", v)
     print(f"$ {cmd}")
     sys.exit(subprocess.run(cmd, shell=True, cwd=ROOT).returncode)
+
+
+def cmd_run(args):
+    cfg = load_config()
+    commands = cfg.get("commands", {})
+    if args.name not in commands:
+        sys.exit(f"명령 '{args.name}' 이 없습니다. 있는 명령: {', '.join(sorted(commands))}")
+    run_shell(cfg, commands[args.name].replace("{target}", " ".join(shlex.quote(t) for t in args.extra)))
 
 
 def cmd_update(_):
@@ -197,6 +214,9 @@ def main():
     p = sub.add_parser("test")
     p.add_argument("target", nargs="*")
     p.add_argument("--all", action="store_true")
+    p = sub.add_parser("run")
+    p.add_argument("name")
+    p.add_argument("extra", nargs="*")
     sub.add_parser("update")
     p = sub.add_parser("stats")
     p.add_argument("--since")
@@ -207,7 +227,7 @@ def main():
     if argv[:1] == ["check-rules"]:
         sys.exit(py("check_rules.py"))
     args = parser.parse_args(argv)
-    {"init": cmd_init, "sync": cmd_sync, "verify": cmd_verify, "test": cmd_test,
+    {"init": cmd_init, "sync": cmd_sync, "verify": cmd_verify, "test": cmd_test, "run": cmd_run,
      "update": cmd_update, "stats": cmd_stats}[args.command](args)
 
 
