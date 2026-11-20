@@ -16,6 +16,11 @@
 | 차단 · 확인 패턴 | `scripts/lib.py` `DEFAULTS` · `packs/<팩>/pack.json` `protected` | 읽기 명령을 막지 않는지 (예: `grep fastlane`) |
 | 프로젝트에 깔리는 파일 | `templates/` · `packs/<팩>/templates/` · `pack.json` `init_files` | init 은 있는 파일을 덮어쓰지 않는다 → 기존 프로젝트에는 PR 제목(→ CHANGELOG)으로 안내 |
 
+## 기존 프로젝트를 깨뜨리지 않기
+
+- **프로젝트가 이미 자체적으로 가지고 있을 수 있는 기능**(브랜치 정책 · TDD 강제 · 추가 검사 등)을 Core · Pack 에 넣을 때는 **기본값을 꺼 두고 `config.json` 으로 켠다** (opt-in). 새 프로젝트는 `project-design` · init 템플릿에서 켜고, 기존 프로젝트는 업데이트를 받아도 동작이 바뀌지 않는다.
+- 이런 변경은 PR 제목 · 본문에 "새 옵션 — 쓰려면 `config.json` 에 …" 를 적는다 (CHANGELOG 가 된다).
+
 ## 확인
 
 ```sh

@@ -456,5 +456,258 @@ class ReleaseScriptTest(unittest.TestCase):
         self.assertEqual(self.show("VERSION"), "0.1.0", "dry-run 은 push 하지 않는다")
 
 
+FAKE_RUNNER = """
+import re
+from pathlib import Path
+
+
+def run_tests(root, targets):
+    # 가짜 실행기: 테스트의 'EXPECT <파일> <문자열>' — 파일이 없으면 load_error, 문자열이 없으면 fail
+    root = Path(root)
+    files = targets or [p.relative_to(root).as_posix() for p in (root / "test").rglob("*_test.dart")]
+    out = {}
+    for t in files:
+        status = "pass"
+        for src, token in re.findall(r"EXPECT (\\S+) (\\S+)", (root / t).read_text()):
+            if not (root / src).exists():
+                status = "load_error"
+                break
+            if token not in (root / src).read_text():
+                status = "fail"
+        out[t] = status
+    return out
+
+
+def prepare(root):
+    pass
+"""
+
+CHAT = "lib/features/chat/domain/chat.dart"
+CHAT_TEST = "test/features/chat/domain/chat_test.dart"
+PAY = "lib/features/pay/domain/pay.dart"
+
+
+class TddGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.write("pubspec.yaml", "name: my_app\n")
+        self.p.write(".harness/checks.py", FAKE_RUNNER)
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["tdd"] = {"enabled": True, "paths": ["lib/features/**/domain/**"]}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write(PAY, "int pay() => 1;\n")
+        self.assertEqual(self.p.commit("chore: 설치", verify=False).returncode, 0)
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def edit(self, rel):
+        return self.p.decision({"tool_name": "Write", "tool_input": {"file_path": str(self.p.root / rel)}})
+
+    def test(self, *targets):
+        return self.p.harness("test", *targets, check=False)
+
+    def write_chat_test(self, token="send"):
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} {token}\nimport 'package:my_app/features/chat/domain/chat.dart';\n")
+
+    def tdd_problems(self):
+        out = self.p.harness("check-code", "--base", "HEAD", check=False).stdout
+        return [l for l in out.splitlines() if "[tdd]" in l]
+
+    def test_disabled_guard_allows_everything(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["tdd"]["enabled"] = False
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.assertEqual(self.edit(CHAT), "allow")
+        self.p.write(CHAT, "x")
+        self.assertEqual(self.tdd_problems(), [])
+
+    def test_full_cycle(self):
+        # ① 테스트 없이 기능 코드 → 차단, 테스트 · 대상 밖 파일은 허용
+        self.assertEqual(self.edit(CHAT), "deny")
+        self.assertEqual(self.edit(CHAT_TEST), "allow")
+        self.assertEqual(self.edit("lib/features/chat/presentation/chat_screen.dart"), "allow")
+        # ② 테스트 작성 → 실행 → 컴파일 실패 RED → 잠금 해제
+        self.write_chat_test()
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.edit(CHAT), "allow")
+        # ③ 골격만 → 완료 아님 (컴파일 실패만 봤다)
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertTrue(any("컴파일 실패(RED)만" in l for l in self.tdd_problems()), self.tdd_problems())
+        # ④ 골격 상태로 실행 → behavior RED → 구현 → GREEN → 완료
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertTrue(any("RED 뒤 GREEN 이 없다" in l for l in self.tdd_problems()))
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+        # ⑤ GREEN 뒤에 코드가 바뀌면 다시 확인해야 한다
+        self.p.write(CHAT, "void send() {}\n// 바뀜\n")
+        self.assertTrue(any("GREEN 이후" in l for l in self.tdd_problems()))
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+        # ⑥ 커밋 (pre-commit 통과) → 기록 초기화 → 다음 변경은 다시 RED 필요
+        self.assertEqual(self.p.commit("feat: 채팅 보내기").returncode, 0)
+        self.assertEqual(self.edit(CHAT), "deny")
+
+    def test_red_of_other_feature_does_not_unlock(self):
+        self.write_chat_test()
+        self.test(CHAT_TEST)
+        self.assertEqual(self.edit(CHAT), "allow")
+        self.assertEqual(self.edit(PAY), "deny")
+
+    def test_commit_blocked_without_cycle(self):
+        self.p.write(PAY, "int pay() => 2;\n")  # 훅 밖(셸 등)에서 고쳤다고 가정
+        r = self.p.commit("fix: 결제")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("[tdd]", r.stdout + r.stderr)
+
+    def test_skip_needs_approval_and_is_bound_to_content(self):
+        self.assertEqual(self.p.decision({"tool_name": "Bash", "tool_input": {"command": ".harness/core/harness tdd skip lib/x.dart --reason r"}}), "ask")
+        self.assertEqual(self.edit(".harness/tdd-skip.json"), "ask")
+        self.p.harness("tdd", "skip", PAY, "--reason", "리팩토링 — 동작 변화 없음")
+        self.assertEqual(self.edit(PAY), "allow")
+        self.assertEqual(self.tdd_problems(), [])
+        self.p.write(PAY, "int pay() => 3;\n")
+        self.assertTrue(any(PAY in l for l in self.tdd_problems()), "내용이 바뀌면 예외가 무효")
+
+    def test_ci_reproduces_red_on_base(self):
+        base = _git(self.p.root, "rev-parse", "HEAD")
+        self.p.write(CHAT, "void send() {}\n")
+        self.write_chat_test("receive")
+        self.p.write(CHAT, "void send() {}\nvoid receive() {}\n")
+        self.assertEqual(self.p.commit("feat: 받기", verify=False).returncode, 0)
+        r = self.p.harness("tdd", "ci", "--base", base, check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RED 재현", r.stdout)
+
+    def test_ci_rejects_test_that_passes_before_change(self):
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.p.commit("chore: 기존 코드", verify=False).returncode, 0)
+        base = _git(self.p.root, "rev-parse", "HEAD")
+        self.write_chat_test("send")  # 이미 있는 동작 — 변경 전에도 통과
+        self.p.write(CHAT, "void send() {}\n// 바꿈\n")
+        self.p.commit("feat: 가짜 TDD", verify=False)
+        out = self.p.harness("tdd", "ci", "--base", base, check=False).stdout
+        self.assertIn("변경 전 코드에서도 통과", out)
+
+    def test_ci_rejects_source_change_without_test(self):
+        base = _git(self.p.root, "rev-parse", "HEAD")
+        self.p.write(PAY, "int pay() => 9;\n")
+        self.p.commit("fix: 결제", verify=False)
+        out = self.p.harness("tdd", "ci", "--base", base, check=False).stdout
+        self.assertIn("연결된 테스트 변경이 없다", out)
+
+
+REQ_DOC = """# 채팅 요구사항
+
+#### CHAT-REQ-001 — 채팅방 생성
+#### CHAT-REQ-002 — 접근 권한
+본문에서 언급만 하는 (CHAT-REQ-003) 은 정의가 아니다.
+"""
+TS_DOC = """# 채팅 시나리오
+
+> 상태: 구현됨
+
+| ID | 요구사항 | 시나리오 | 테스트 |
+|----|----------|----------|--------|
+| CHAT-TS-001 | CHAT-REQ-001 | 지원하면 채팅방이 생긴다 | api |
+| CHAT-TS-002 | CHAT-REQ-002 | 제3자는 못 본다 | api |
+"""
+TEST_PY = """import pytest
+
+
+@pytest.mark.scenario("CHAT-TS-001")
+def test_create():
+    pass
+
+
+@pytest.mark.scenario("CHAT-TS-002")
+def test_forbidden():
+    pass
+"""
+
+
+class TraceabilityTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"] = {"enabled": True, "requirement_docs": ["docs/specs/*.md"],
+                        "scenario_docs": ["docs/domains/*/test-scenarios.md"], "tests": ["tests/**/test_*.py"],
+                        "test_marker": "@pytest\\.mark\\.scenario\\(\\s*[\"']([^\"']+)[\"']"}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write("docs/specs/chat.md", REQ_DOC)
+        self.p.write("docs/domains/chat/test-scenarios.md", TS_DOC)
+        self.p.write("tests/test_chat.py", TEST_PY)
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def trace(self, *args):
+        return self.p.harness("trace", *args, check=False)
+
+    def test_clean(self):
+        r = self.trace()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("요구사항 2개 · 시나리오 2개 중 2개가 테스트에 연결됨 (경고 0, 오류 0)", r.stdout)
+
+    def test_show_chain(self):
+        out = self.trace("CHAT-REQ-002").stdout
+        self.assertIn("CHAT-TS-002", out)
+        self.assertIn("tests/test_chat.py:9", out)
+        self.assertIn("요구사항: CHAT-REQ-001", self.trace("CHAT-TS-001").stdout)
+
+    def test_violations(self):
+        self.p.write("tests/test_chat.py", TEST_PY.replace('"CHAT-TS-002"', '"CHAT-TS-001"')
+                     + '\n\n@pytest.mark.scenario("CHAT-TS-999")\ndef test_ghost():\n    pass\n'
+                     + '\n\n@pytest.mark.scenario("chat-1")\ndef test_bad():\n    pass\n')
+        self.p.write("docs/domains/chat/test-scenarios.md", TS_DOC + "| CHAT-TS-001 | CHAT-REQ-002 | 중복 | api |\n| CHAT-TS-003 | CHAT-REQ-777 | 정의 없음 | api |\n")
+        r = self.trace()
+        self.assertNotEqual(r.returncode, 0)
+        for msg in ["테스트 여러 개에 붙은 ID: CHAT-TS-001", "시나리오 문서에 없는 ID: CHAT-TS-999", "형식 오류: 'chat-1'",
+                    "시나리오 ID 중복: CHAT-TS-001", "테스트가 없는 시나리오: CHAT-TS-002", "정의되지 않은 REQ: CHAT-REQ-777"]:
+            self.assertIn(msg, r.stdout)
+
+    def test_pending_doc_only_warns(self):
+        self.p.write("docs/domains/chat/test-scenarios.md", TS_DOC.replace("> 상태: 구현됨", "> 상태: 구현 전")
+                     + "| CHAT-TS-003 | CHAT-REQ-002 | 아직 테스트 없음 | api |\n")
+        r = self.trace()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("경고: docs/domains/chat/test-scenarios.md", r.stdout)
+
+    def test_requirement_coverage(self):
+        self.p.write("docs/specs/chat.md", REQ_DOC + "#### CHAT-REQ-004 — 시나리오 없음\n")
+        self.assertIn("시나리오가 없는 요구사항: CHAT-REQ-004", self.trace().stdout)
+        self.assertEqual(self.trace().returncode, 0, "기본(warn)은 경고만")
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"]["requirement_coverage"] = "error"
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.assertNotEqual(self.trace().returncode, 0)
+
+    def test_default_marker_is_any_id_in_tests(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"] = {"enabled": True, "scenario_docs": ["docs/domains/*/test-scenarios.md"]}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write("test/chat_test.dart", "void main() {\n  test('CHAT-TS-001 지원하면 채팅방', () {});\n  test('CHAT-TS-002 제3자', () {});\n}\n")
+        self.p.write("tests/test_chat.py", "")  # test_dirs(test/) 밖이라 기본 설정에서는 보지 않는다
+        r = self.trace()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_check_code_reports_trace_but_not_on_single_file(self):
+        self.p.write("tests/test_chat.py", TEST_PY.replace('"CHAT-TS-002"', '"CHAT-TS-999"'))
+        out = self.p.harness("check-code", check=False).stdout
+        self.assertIn("[trace]", out)
+        self.assertNotIn("[trace]", self.p.harness("check-code", "--file", "tests/test_chat.py", check=False).stdout)
+
+    def test_disabled(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["trace"]["enabled"] = False
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write("tests/test_chat.py", TEST_PY.replace('"CHAT-TS-002"', '"CHAT-TS-999"'))
+        self.assertIn("꺼짐", self.trace().stdout)
+        self.assertNotIn("[trace]", self.p.harness("check-code", check=False).stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -110,4 +110,41 @@ echo "4. 위반 검출 · 원복 후 통과"
 python3 .harness/core/scripts/harness.py test test/features/home/domain/greeting_test.dart >/dev/null || fail "harness test 실패"
 out="$(flutter analyze 2>&1)" || { echo "$out"; fail "flutter analyze 실패 (팩 린트 설정이 이 Flutter 버전과 맞지 않을 수 있다)"; }
 echo "5. harness test · flutter analyze 통과"
+# ── TDD Guard (실제 flutter test 로) ──
+unset GITHUB_ACTIONS  # 여기부터는 로컬 개발을 흉내 낸다 (CI 에서는 로컬 기록 대신 tdd ci 가 검사하므로 건너뛰게 되어 있다)
+python3 - <<'PY'
+import json
+p = ".harness/config.json"; c = json.load(open(p))
+c["tdd"] = {"enabled": True, "paths": ["lib/features/**/domain/**"]}
+json.dump(c, open(p, "w"), indent=2)
+PY
+git add -A && git commit -q --no-verify -m "chore: TDD Guard 켜기"
+BASE="$(git rev-parse HEAD)"
+SRC=lib/features/home/domain/counter.dart
+TEST=test/features/home/domain/counter_test.dart
+decision() { python3 -c 'import json,sys; print(json.dumps({"tool_name":"Write","tool_input":{"file_path":sys.argv[1]}}))' "$PWD/$1" \
+  | python3 .harness/core/scripts/hooks/pre_tool.py | python3 -c 'import json,sys; d=sys.stdin.read(); print(json.loads(d)["hookSpecificOutput"]["permissionDecision"] if d.strip() else "allow")'; }
+[ "$(decision $SRC)" = deny ] || fail "테스트 전 기능 코드 편집이 차단되지 않았다"
+cat > $TEST <<'EOF2'
+import 'package:fixture_app/features/home/domain/counter.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('1 을 올리면 2 가 된다', () {
+    expect(increment(1), 2);
+  });
+}
+EOF2
+python3 .harness/core/scripts/harness.py test $TEST >/dev/null && fail "구현 전인데 테스트가 통과했다"
+[ "$(decision $SRC)" = allow ] || fail "RED 확인 후에도 편집이 차단됐다"
+echo "int increment(int value) => value;" > $SRC
+python3 .harness/core/scripts/harness.py verify >/dev/null 2>&1 && fail "컴파일 실패 RED 만으로 verify 가 통과했다"
+python3 .harness/core/scripts/harness.py test $TEST >/dev/null && fail "골격인데 테스트가 통과했다"
+echo "int increment(int value) => value + 1;" > $SRC
+python3 .harness/core/scripts/harness.py test $TEST >/dev/null || fail "구현 후 테스트가 실패했다"
+python3 .harness/core/scripts/harness.py verify >/dev/null || { python3 .harness/core/scripts/harness.py verify; fail "RED → GREEN 후 verify 실패"; }
+git add -A && git commit -q -m "feat: 카운터" || fail "RED → GREEN 후 커밋이 막혔다"
+[ "$(decision $SRC)" = deny ] || fail "커밋 후에도 이전 RED 로 편집이 허용됐다"
+python3 .harness/core/scripts/harness.py tdd ci --base "$BASE" >/dev/null || { python3 .harness/core/scripts/harness.py tdd ci --base "$BASE"; fail "CI RED 재현 실패"; }
+echo "6. TDD Guard: 차단 → 컴파일 RED → 골격 → behavior RED → GREEN → verify · 커밋 → 재잠금 → CI RED 재현"
 echo "✓ Flutter 팩 fixture 통과 ($(flutter --version | head -1))"

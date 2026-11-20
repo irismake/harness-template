@@ -41,7 +41,7 @@ description: 모든 프로젝트 공통 — 작업 범위 · 승인 필요 작�
 ## 작업 절차 · 검증
 
 - 반복 작업은 스킬을 따른다: `project-design`(설계) · `feature`(기능 · 리팩토링, TDD) · `bugfix`(재현 테스트 먼저) · `pr`(커밋 · PR, 요청 시만) · `feedback`(실수 → 재발 방지).
-- 테스트는 `.harness/core/harness test <파일|폴더>` 로 **관련 테스트만** 실행한다. TDD 단계(RED · GREEN)에서는 사용자 요청 없이 실행한다.
+- 테스트는 `.harness/core/harness test <파일|폴더>` 로 **관련 테스트만** 실행한다. TDD 단계(RED · GREEN)에서는 사용자 요청 없이 실행한다. `config.json` `tdd.enabled` 면 TDD Guard 가 RED 기록 없는 기능 코드 수정 · 완료를 막는다 (`feature` 스킬). `trace.enabled` 면 요구사항(REQ) → 시나리오(TS) → 테스트를 문서와 테스트에 ID 로 연결한다 (`harness trace`).
 - 작업을 마치기 전에 `.harness/core/harness verify` (하네스 구성 · 코드 규칙 · 포맷 · 정적 분석, 수 초) 를 통과시킨다. Claude 는 훅이 자동으로 검사한다.
 - **로컬 검증에 전체 테스트 · 릴리스 빌드를 넣지 않는다** (오래 걸린다). CI 가 맡는다. 사용자가 요청할 때만 로컬에서 실행한다.
 - 실행하지 않은 검증은 결과를 보고하지 않는다 ("빌드 성공" · "테스트 통과" 등). 실행 결과만 근거로 쓴다.

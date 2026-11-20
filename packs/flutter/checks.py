@@ -85,3 +85,80 @@ def lint(ctx, paths):
         if len(parts) >= 8 and parts[0] in {"ERROR", "WARNING", "INFO"}:
             rel = os.path.relpath(parts[3], root)
             ctx.report(f"analyze-{parts[0].lower()}", rel, parts[4], f"{parts[2].lower()}: {'|'.join(parts[7:])}", "analysis_options.yaml")
+
+
+# ── TDD Guard 연결 (scripts/tdd.py) ─────────────────────────
+
+def is_test(path):
+    return path.endswith("_test.dart") and path.startswith(("test/", "integration_test/"))
+
+
+def test_for(src):
+    """lib/a/b.dart → test/a/b_test.dart (규칙상 짝)"""
+    if src.startswith("lib/") and src.endswith(".dart"):
+        return "test/" + src[len("lib/"):-len(".dart")] + "_test.dart"
+    return None
+
+
+def _package_name(root):
+    try:
+        for line in (root / "pubspec.yaml").read_text().splitlines():
+            if line.startswith("name:"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def import_keys(root, src):
+    """테스트가 src 를 import 했는지 찾을 문자열"""
+    keys = [src]  # 상대 경로 import (../lib/...)
+    name = _package_name(root)
+    if name and src.startswith("lib/"):
+        keys.insert(0, f"package:{name}/{src[len('lib/'):]}")
+    return keys
+
+
+def _flutter(root):
+    return ["fvm", "flutter"] if _uses_fvm(root) else ["flutter"]
+
+
+def prepare(root):
+    subprocess.run([*_flutter(root), "pub", "get"], cwd=root, capture_output=True, text=True)
+
+
+def run_tests(root, targets):
+    """flutter test --reporter json → {테스트 파일(상대 경로): pass | fail | load_error}. 실패 내용은 사람이 읽게 출력한다."""
+    import json
+    r = subprocess.run([*_flutter(root), "test", "--reporter", "json", *targets], cwd=root, capture_output=True, text=True)
+    suites, tests, results, errors = {}, {}, {}, {}
+    for line in r.stdout.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        kind = e.get("type")
+        if kind == "suite":
+            suites[e["suite"]["id"]] = os.path.relpath(os.path.realpath(e["suite"]["path"]), os.path.realpath(root))
+        elif kind == "testStart":
+            t = e["test"]
+            tests[t["id"]] = (suites.get(t.get("suiteID")), t["name"])
+        elif kind == "error":
+            errors.setdefault(e["testID"], e["error"].strip().splitlines()[0][:200])
+        elif kind == "testDone" and e["testID"] in tests:
+            suite, name = tests[e["testID"]]
+            if suite is None:
+                continue
+            loading = name.startswith("loading ")
+            if e["result"] == "success":
+                results.setdefault(suite, "pass")
+                continue
+            results[suite] = "load_error" if loading else ("fail" if results.get(suite) != "load_error" else "load_error")
+            print(f"  ✗ {suite} — {'컴파일 실패' if loading else name}: {errors.get(e['testID'], e['result'])}")
+    for suite in suites.values():
+        results.setdefault(suite, "pass")
+    if not results and r.returncode != 0:
+        print((r.stdout + r.stderr)[-2000:])
+    for suite, status in sorted(results.items()):
+        print(f"  {'✓' if status == 'pass' else '✗'} {suite}: {status}")
+    return results

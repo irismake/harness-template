@@ -30,3 +30,4 @@ paths:
 
 - 관련 테스트만: `.harness/core/harness test test/<경로>_test.dart` (폴더도 된다). RED 는 **기대한 이유로** 실패하는지까지 확인한다.
 - 전체 테스트(`harness test --all`)는 CI 가 한다. 사용자가 요청할 때만 로컬에서 실행한다.
+- 테스트는 꼭 `harness test` 로 실행한다 (직접 `flutter test` 는 TDD Guard 기록이 남지 않는다). CI 는 PR 의 새 테스트를 변경 전 코드에서 실행해 실패하는지 다시 확인한다.

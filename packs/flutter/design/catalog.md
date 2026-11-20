@@ -139,8 +139,19 @@ Firebase / Supabase: SDK 호출은 `data/` 의 데이터 소스 안에만. 화�
 | 브랜치 | **`main` 하나 — 기능 브랜치 → PR → Squash (추천: 1~3인)** · `dev` + `main` (dev 에서 개발, 출시 때 main 으로 승격) · `dev` + `staging` + `main` | `base_branch` · `protected_branches`, CI `push.branches` |
 | Flutter 버전 | **fvm 으로 프로젝트에 고정 (추천)** · 시스템 Flutter | fvm 이면 `fvm use <버전>` → `.fvmrc` 커밋 (팩 명령이 자동으로 `fvm flutter` 를 쓴다), CI 도 같은 버전 |
 | 테스트 정책 | **도메인 · 상태 · 데이터 변환은 TDD 필수, 화면은 핵심 위젯 테스트 (추천)** · 로직만 · 위젯까지 전부 | `architecture.md` · 팩 `testing.md` |
+| TDD Guard (강제) | **켬 — TDD 필수 범위의 기능 코드는 실패하는 테스트를 실행한 뒤에만 고칠 수 있다 (추천)** · 끔 — 절차 안내만 | `config.json` `tdd` (아래) |
 | 목 도구 | **mocktail (추천: 코드 생성 없음)** · mockito(+ build_runner) · 직접 만든 가짜 구현 | dev 의존성 |
 | CI 범위 | **하네스 검사 + 포맷 · 분석 · 테스트 (추천)** · + Android · iOS 빌드 확인 · + 배포(스토어) 자동화는 나중에 따로 | `.github/workflows/ci.yml` |
+
+TDD Guard 를 켜면 `config.json` 에 테스트 정책의 "TDD 필수" 범위를 경로로 쓴다. UI · 문구 · 테마는 넣지 않는다.
+
+```json
+"tdd": {
+  "enabled": true,
+  "paths": ["lib/features/**/domain/**", "lib/features/**/data/**", "lib/features/**/presentation/**/*_notifier.dart", "lib/core/network/**"]
+}
+```
+(상태 관리 선택에 맞춰 `*_notifier.dart` · `*_bloc.dart` · `*_cubit.dart` · `*_controller.dart` 를 고른다. 인증 · 결제 폴더가 있으면 더한다)
 
 ---
 
@@ -152,5 +163,5 @@ Firebase / Supabase: SDK 호출은 `data/` 의 데이터 소스 안에만. 화�
 | `.harness/rules/project.md` | 개요 · 도메인 용어 · 핵심 결정 요약 · 브랜치 · 기능 목록 (60줄 이내, 항상 로드) |
 | `.harness/rules/architecture.md` | `paths: ["lib/**"]` — 폴더 구조 · 계층 · 의존 방향 · 상태 관리 · 라우팅 · DI · 로깅 · 오류 처리 (위 "규칙에 쓸 것" 중 고른 것만) |
 | `.harness/rules/data.md` | `paths:` 데이터 폴더 (예: `lib/features/**/data/**` · `lib/core/network/**`) — 네트워크 · DTO/엔티티 · 저장소 · 토큰 저장 (백엔드 · 저장소가 있을 때만) |
-| `.harness/config.json` | `design_done: true` · `base_branch` · `protected_branches` · `layers` · `risk_areas`(예: `lib/core/network/**`, 인증 폴더) |
+| `.harness/config.json` | `design_done: true` · `base_branch` · `protected_branches` · `layers` · `risk_areas`(예: `lib/core/network/**`, 인증 폴더) · `tdd`(TDD Guard 를 켰으면) |
 | 앱 골격 | `flutter create` → `analysis_options.yaml`(팩 템플릿) → 패키지 → 폴더 구조 · 앱 시작 코드 · 라우터 · 테마 · 로거 → 스모크 테스트 |
