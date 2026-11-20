@@ -10,6 +10,7 @@
   test <대상>        관련 테스트만 실행 (config commands.test). 전체는 --all (보통 CI 가 한다)
   tdd status|skip|ci  TDD Guard 상태 · 예외(사용자 승인) · CI 의 RED 재현 검사
   pr check-promotion H B  승격 PR 사전 확인 (경로 · 빈 diff · 중복 PR · 필수 검사) — 조회만
+  metrics github [--since D]  PR 유형 · 버그 수정 비율 · CI 최초 통과율 · 실패 job — 하네스 버전별 · 도입 전후 (조회만)
   usage [--compare A B]  토큰 실측 (세션 기록 → 역할 · 규모 · 하네스 버전, 도입 전후 비교)
   work current|lane  작업 구간 (자동 시작 · 자동 종료) — 지금 작업의 산출물 경로 · 규모 · 라운드, 규모 선언
   trace [ID]         요구사항 추적 검사 · REQ/시나리오 하나의 연결(→ 시나리오 → 테스트 위치) 보기
@@ -279,11 +280,14 @@ def main():
     sub.add_parser("work", add_help=False)
     sub.add_parser("usage", add_help=False)
     sub.add_parser("pr", add_help=False)
+    sub.add_parser("metrics", add_help=False)
     sub.add_parser("update")
     p = sub.add_parser("stats")
     p.add_argument("--since")
 
     argv = sys.argv[1:]
+    if argv[:2] == ["metrics", "github"]:
+        sys.exit(py("metrics_github.py", *argv[2:]))
     if argv[:1] == ["pr"]:
         sys.exit(py("promote.py", *argv[1:]))
     if argv[:1] == ["usage"]:

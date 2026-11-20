@@ -1211,5 +1211,67 @@ class PromotionTest(unittest.TestCase):
         self.assertIn("승격 경로(promotion)가 없다", self.check().stdout)
 
 
+
+FAKE_GH_METRICS = """#!/usr/bin/env python3
+import json, sys, pathlib
+cfg = json.loads(pathlib.Path("fakegh.json").read_text())
+a = sys.argv[1:]
+if a[:2] == ["repo", "view"]:
+    print(json.dumps({"nameWithOwner": "o/r"}))
+elif a[:2] == ["api", "graphql"]:
+    print(json.dumps({"data": {"repository": {"pullRequests": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": cfg["prs"]}}}}))
+elif a[0] == "api" and "/jobs" in a[1]:
+    print(json.dumps({"jobs": [{"name": "Lint", "conclusion": "failure"}, {"name": "Test", "conclusion": "success"}]}))
+elif a[0] == "api" and "actions/runs" in a[1]:
+    print(json.dumps({"workflow_runs": cfg["runs"]}))
+"""
+
+
+class MetricsGithubTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.write("README.md", "# app\n")
+        self.p.run("git", "add", "README.md")  # .harness/core 없이
+        self.p.run("git", "commit", "-q", "--no-verify", "-m", "chore: 하네스 전")
+        self.before = _git(self.p.root, "rev-parse", "HEAD")
+        self.p.harness("init", "flutter")
+        self.p.write(".gitignore", (self.p.root / ".gitignore").read_text() + "fakegh.json\n")
+        self.p.commit("chore: 하네스 설치", verify=False)
+        self.after = _git(self.p.root, "rev-parse", "HEAD")
+        gh = Path(self.p.tmp.name) / "gh"
+        gh.write_text(FAKE_GH_METRICS)
+        gh.chmod(0o755)
+        self.env = {**ENV, "HARNESS_GH": str(gh)}
+        pr = lambda n, title, head, oid: {"number": n, "title": title, "headRefName": head, "baseRefName": "main",
+                                         "mergedAt": "2026-11-10T00:00:00Z", "mergeCommit": {"oid": oid}, "commits": {"totalCount": 2}}
+        run = lambda i, name, br, concl, sha, t: {"id": i, "name": name, "event": "pull_request", "head_branch": br, "conclusion": concl,
+                                                 "head_sha": sha, "created_at": f"2026-11-10T00:0{t}:00Z"}
+        (self.p.root / "fakegh.json").write_text(json.dumps({
+            "prs": [pr(1, "feat: a", "feat/a", self.before), pr(2, "fix: b", "fix/b", self.after), pr(3, "c", "feat/c", self.after),
+                    pr(4, "staging", "main", self.after)],
+            "runs": [run(10, "CI", "feat/a", "failure", self.before, 1), run(11, "CI", "feat/a", "success", self.before, 2),
+                     run(12, "CI", "fix/b", "success", self.after, 3), run(13, "CI", "feat/c", "cancelled", self.after, 4)]}))
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def test_metrics_by_version(self):
+        r = subprocess.run([sys.executable, ".harness/core/scripts/harness.py", "metrics", "github"], cwd=self.p.root,
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout
+        self.assertIn("| 전체 | 3 |", out, "승격 PR(head=main) 제외")
+        self.assertIn("| 도입 전 | 1 |", out)
+        self.assertIn("버그 수정 비율", out)
+        self.assertIn("CI / Lint 1", out)
+        res = json.loads(sorted((self.p.root / ".harness/out/metrics").glob("github-*.json"))[-1].read_text())
+        allpr = res["all"]["pr"]
+        self.assertEqual(allpr["by_type"], {"feat": 2, "fix": 1}, "제목 접두사 → 없으면 브랜치 접두사")
+        self.assertEqual(allpr["fix_ratio_pct"], 33.3)
+        self.assertEqual(res["all"]["ci"]["first_pass_pct"], 50.0, "feat/a 첫 실행 실패 · fix/b 성공 · 취소 제외")
+        self.assertEqual(res["by_version"]["도입 전"]["pr"]["prs"], 1)
+        self.assertNotIn("fakegh", self.p.run("git", "status", "--porcelain").stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

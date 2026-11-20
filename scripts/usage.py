@@ -216,16 +216,14 @@ def load_works(since=None):
 _version_cache = {}
 
 
-def harness_version_at(ts):
-    """그 시각 base 브랜치의 .harness/core 포인터 → 릴리스 버전 (없으면 '도입 전')"""
-    cfg = load_config()
-    base = base_ref(cfg) or "HEAD"
-    when = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # git 은 ISO 만 정확히 읽는다
-    commit = git("rev-list", "-1", f"--before={when}", base, check=False).strip()
+def version_for_commit(commit):
+    """그 커밋의 .harness/core → 하네스 버전. 없으면 "도입 전", 커밋을 모르면 "?" """
     if not commit:
         return "도입 전"
     if commit in _version_cache:
         return _version_cache[commit]
+    if subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode != 0:
+        return "?"
     line = git("ls-tree", commit, ".harness/core", check=False).strip()
     if not line:
         v = "도입 전"
@@ -233,12 +231,20 @@ def harness_version_at(ts):
         v = git("show", f"{commit}:.harness/core/VERSION", check=False).strip() or "개발 중(main)"
     else:
         sha = line.split()[2]
-        v = subprocess.run(["git", "-C", str(ROOT / ".harness/core"), "show", f"{sha}:VERSION"], capture_output=True, text=True).stdout.strip()
+        core = str(ROOT / ".harness/core")
+        v = subprocess.run(["git", "-C", core, "show", f"{sha}:VERSION"], capture_output=True, text=True).stdout.strip()
         if not v:
-            tag = subprocess.run(["git", "-C", str(ROOT / ".harness/core"), "describe", "--tags", "--abbrev=0", sha], capture_output=True, text=True).stdout.strip()
+            tag = subprocess.run(["git", "-C", core, "describe", "--tags", "--abbrev=0", sha], capture_output=True, text=True).stdout.strip()
             v = tag.lstrip("v") or sha[:7]
     _version_cache[commit] = v
     return v
+
+
+def harness_version_at(ts):
+    """그 시각 base 브랜치의 하네스 버전 (없으면 '도입 전')"""
+    base = base_ref(load_config()) or "HEAD"
+    when = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # git 은 ISO 만 정확히 읽는다
+    return version_for_commit(git("rev-list", "-1", f"--before={when}", base, check=False).strip())
 
 
 def branch_groups(since=None):
