@@ -37,6 +37,11 @@ WORKSPACE = HARNESS / "_workspace"   # 역할 산출물 · 작업 상태 (gitign
 # 하네스가 쓰는 로컬 파일 — 상태 비교 · 해시에서 뺀다
 LOCAL_DIRS = (".harness/out/", ".harness/_workspace/")
 
+
+def is_local(path):
+    """하네스 로컬 파일 · 파이썬 캐시 — 상태 비교 · 해시 · 변경 목록에서 뺀다"""
+    return path.startswith(LOCAL_DIRS) or path.startswith(".harness/core") or "__pycache__/" in path or path.endswith(".pyc")
+
 # 모든 팩 · 프로젝트에 공통인 기본값. 팩(pack.json) → 프로젝트(config.json) 순서로 덮어쓴다.
 # 리스트는 이어 붙이고(중복 제거), 값은 덮어쓴다.
 DEFAULTS = {
@@ -139,7 +144,12 @@ def _load_module(path, name):
         return None
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    import sys
+    prev, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # 프로젝트 폴더에 __pycache__ 를 만들지 않는다
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = prev
     return module
 
 
@@ -214,7 +224,7 @@ def changed_files(cfg):
     else:
         files |= set(git("ls-files", "--cached", check=False).split("\n"))
     files |= set(git("ls-files", "--others", "--exclude-standard", check=False).split("\n"))
-    return sorted(f for f in files if f and not f.startswith(LOCAL_DIRS) and not f.startswith(".harness/core"))
+    return sorted(f for f in files if f and not is_local(f))
 
 
 def file_states(cwd=None):
@@ -228,7 +238,7 @@ def file_states(cwd=None):
         paths |= set(git("ls-files", "--cached", cwd=root, check=False).split("\n"))
     paths |= set(git("ls-files", "--others", "--exclude-standard", cwd=root, check=False).split("\n"))
     out = {}
-    for p in sorted(x for x in paths if x and not x.startswith(LOCAL_DIRS) and not x.startswith(".harness/core")):
+    for p in sorted(x for x in paths if x and not is_local(x)):
         f = root / p
         if f.is_symlink():
             out[p] = "link:" + os.readlink(f)
@@ -254,7 +264,8 @@ def tree_entries(cwd=None):
     out = {}
     for line in listing.splitlines():
         meta, path = line.split("\t", 1)
-        if not path.startswith(LOCAL_DIRS):
+        cache = "__pycache__/" in path or path.endswith(".pyc")
+        if not cache and (not is_local(path) or path.startswith(".harness/core")):  # 하네스 포인터는 상태에 포함
             out[path] = meta.split()[2]
     return out
 
