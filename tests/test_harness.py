@@ -298,7 +298,7 @@ class ReleaseBranchTest(unittest.TestCase):
         _git(self.src, "commit", "-q", "-m", "release 0.1.0")
         _git(self.src, "tag", "v0.1.0")
         _git(self.src, "branch", "release")
-        (self.src / "CHANGELOG.md").write_text("개발 중\n")
+        (self.src / "README.md").write_text("개발 중\n")
         _git(self.src, "commit", "-qam", "개발 중 커밋")
         self.dev_commit = _git(self.src, "rev-parse", "HEAD")
         self.release_commit = _git(self.src, "rev-parse", "v0.1.0")
@@ -377,6 +377,83 @@ class UpgradeCompatibilityTest(unittest.TestCase):
             self.assertEqual(p.harness("check-code", "--base", "HEAD", check=False).returncode, 0)
         finally:
             p.tmp.cleanup()
+
+
+class ReleaseScriptTest(unittest.TestCase):
+    """scripts/release.py — main 커밋 분석 → VERSION · CHANGELOG · 태그 · release 이동 (main 은 건드리지 않는다)"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.origin = base / "origin.git"
+        _git(base, "init", "-q", "--bare", str(self.origin))
+        self.work = base / "work"
+        self.work.mkdir()
+        _git(self.work, "init", "-q", "-b", "main")
+        (self.work / "VERSION").write_text("0.1.0\n")
+        (self.work / "CHANGELOG.md").write_text("# 변경 기록\n\n## 0.1.0 — 2026-11-20\n\n- 첫 릴리스\n")
+        self.commit("feat: 첫 릴리스")
+        _git(self.work, "tag", "-a", "v0.1.0", "-m", "0.1.0")
+        _git(self.work, "remote", "add", "origin", str(self.origin))
+        _git(self.work, "push", "-q", "origin", "main", "main:refs/heads/release", "v0.1.0")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def commit(self, subject, body=""):
+        (self.work / "f.txt").write_text(subject)
+        _git(self.work, "add", "-A")
+        _git(self.work, "commit", "-q", "-m", subject + (f"\n\n{body}" if body else ""))
+        _git(self.work, "push", "-q", "origin", "HEAD:main") if (self.work / ".git/refs/remotes/origin").exists() else None
+        return _git(self.work, "rev-parse", "HEAD")
+
+    def release(self, *extra):
+        _git(self.work, "fetch", "-q", "--tags", "origin")
+        r = subprocess.run([sys.executable, str(TEMPLATE / "scripts/release.py"), "--main", "HEAD", *extra],
+                           cwd=self.work, capture_output=True, text=True, env=GIT_FILE_ENV)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _git(self.work, "fetch", "-q", "--tags", "origin")
+        return r.stdout
+
+    def show(self, path):
+        return _git(self.work, "show", f"origin/release:{path}")
+
+    def test_bumps_and_skips(self):
+        self.commit("docs: README 정리 (#2)")
+        self.commit("test: 테스트 추가")
+        self.assertIn("릴리스 없음", self.release())
+        self.assertEqual(self.show("VERSION"), "0.1.0")
+
+        main_sha = self.commit("fix: 오탐 수정 (#3)")
+        out = self.release()
+        self.assertIn("0.1.0 → 0.1.1 (patch)", out)
+        self.assertEqual(self.show("VERSION"), "0.1.1")
+        log = self.show("CHANGELOG.md")
+        self.assertIn("## 0.1.1", log)
+        self.assertIn("- fix: 오탐 수정 (#3)", log)
+        self.assertIn("- docs: README 정리 (#2)", log)  # 기타로 기록
+        self.assertIn("## 0.1.0", log)
+        self.assertLess(log.index("## 0.1.1"), log.index("## 0.1.0"))
+        parents = _git(self.work, "log", "-1", "--format=%P", "origin/release").split()
+        self.assertIn(main_sha, parents)
+        self.assertEqual(_git(self.work, "rev-parse", "v0.1.1^{commit}"), _git(self.work, "rev-parse", "origin/release"))
+        self.assertEqual(_git(self.work, "rev-parse", "origin/main"), main_sha, "main 은 바뀌지 않는다")
+
+        self.assertIn("릴리스 없음", self.release())  # 같은 커밋 다시
+
+        prev_release = _git(self.work, "rev-parse", "origin/release")
+        self.commit("feat: 새 검사 (#4)")
+        self.assertIn("0.1.1 → 0.2.0 (minor)", self.release())
+        _git(self.work, "merge-base", "--is-ancestor", prev_release, "origin/release")  # fast-forward
+
+        self.commit("feat!: 설정 키 변경")
+        self.assertIn("0.2.0 → 0.3.0 (major)", self.release())  # 1.0 전에는 깨지는 변경도 minor 자리
+
+    def test_manual_bump_and_dry_run(self):
+        self.commit("chore: 정리")
+        out = self.release("--bump", "patch", "--dry-run")
+        self.assertIn("0.1.0 → 0.1.1", out)
+        self.assertEqual(self.show("VERSION"), "0.1.0", "dry-run 은 push 하지 않는다")
 
 
 if __name__ == "__main__":

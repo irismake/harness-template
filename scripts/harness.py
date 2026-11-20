@@ -44,8 +44,9 @@ RELEASE_BRANCH = "release"
 
 
 def core_version():
+    """릴리스 커밋에만 VERSION 이 있다 (main 은 개발 중)"""
     f = CORE / "VERSION"
-    return f.read_text().strip() if f.exists() else "?"
+    return f.read_text().strip() if f.exists() else "개발 중(main)"
 
 
 def track_release_branch():

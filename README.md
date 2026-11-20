@@ -446,27 +446,37 @@ def lint(ctx, paths):        # 선택 — --lint 일 때
 
 ## 13. 하네스 업데이트 (서브모듈 · 릴리스)
 
-### 버전 · 릴리스
+### 버전 · 릴리스 (자동)
 
 | | 뜻 |
 |---|---|
-| `VERSION` 파일 | 현재 버전 (예: `0.1.0`). 태그와 항상 같다 |
-| Git 태그 `vX.Y.Z` | 정식 릴리스 후보. push 하면 릴리스 워크플로가 돈다 |
-| `release` 브랜치 | **정식 릴리스만** 가리킨다. 릴리스 워크플로가 Template CI 를 다시 통과한 태그 커밋으로만 옮긴다 (fast-forward) |
+| Git 태그 `vX.Y.Z` | 정식 릴리스. **자동 릴리스가 붙인다** |
+| `release` 브랜치 | 정식 릴리스 커밋만 쌓인다. 각 릴리스 커밋 = 그때의 `main` 코드 + `VERSION` + `CHANGELOG.md` |
+| `VERSION` · `CHANGELOG.md` | **릴리스 커밋에만** 있다 (= 프로젝트의 `.harness/core` 에는 있다). `main` 에는 없다 — 보호 브랜치라 봇이 쓰지 않는다 |
 | `main` 의 일반 커밋 | 개발 중. 프로젝트 업데이트 대상이 **아니다** |
+
+릴리스 여부와 버전은 `main` 에 들어온 커밋 제목(= Squash 머지한 PR 제목)으로 정한다.
+
+| PR 제목 type | 릴리스 |
+|---|---|
+| `feat` | minor (0.1.0 → 0.2.0) |
+| `fix` · `perf` · `refactor` · `ci` · `build` · `revert` | patch (0.1.0 → 0.1.1) — `ci` 는 프로젝트 CI 템플릿도 바꾸므로 포함 |
+| `docs` · `chore` · `test` · `style` 만 | 릴리스 없음 (다음 릴리스 CHANGELOG 의 "기타" 에 들어간다) |
+| type 뒤 `!` (예: `feat!:`) 또는 본문 `BREAKING CHANGE` | major (1.0 전에는 minor 자리) |
 
 프로젝트 서브모듈은 `.gitmodules` 의 `branch = release` 를 따라간다 (`submodule add -b release`, 없으면 `harness init` 이 넣는다). 그래서 Dependabot 도 `harness update` 도 정식 릴리스만 본다.
 
 ### 전체 흐름
 
 ```
-하네스 변경 (템플릿 레포 PR)
-  ↓ Template CI (test.yml)            회귀 테스트 · Flutter 앱 fixture · 이전 릴리스 → 지금 업그레이드
-main 머지
-  ↓ VERSION · CHANGELOG 올리고 태그 vX.Y.Z push
-릴리스 워크플로 (release.yml)          태그 = VERSION · CHANGELOG 항목 · main 에 있는 커밋 · Template CI 재실행
-  ↓ 모두 통과하면 release 브랜치 → 태그 커밋     (하나라도 실패하면 release 는 그대로 = 배포 안 됨)
-각 프로젝트 Dependabot (매주)           release 브랜치에서 새 태그 커밋 발견 → "bump .harness/core from vA to vB" PR
+하네스 변경 PR (제목 = Conventional Commit, Template CI 가 형식 검사)
+  ↓ Template CI (test.yml)            회귀 테스트 · Flutter 앱 fixture · 이전 릴리스 → 지금 업그레이드   ← Required check
+Squash 머지 → main
+  ↓ main push 의 Template CI 재실행
+  ↓ 성공하면 자동 릴리스 (release.yml · scripts/release.py)
+지난 릴리스 이후 커밋 분석 → 버전 결정 (또는 "릴리스 없음")
+  ↓ release 브랜치에 릴리스 커밋 (main 코드 + VERSION + CHANGELOG) · 태그 vX.Y.Z · release fast-forward
+각 프로젝트 Dependabot (매주)           release 브랜치의 새 태그 발견 → "bump .harness/core from vA to vB" PR
   ↓ 프로젝트 CI (ci.yml) 전체          새 하네스로 checkout(submodules: true) → harness verify · 포맷 · 분석 · 테스트 (· 빌드)
 PASS → 사람이 머지 / FAIL → 머지하지 않음 (기존 버전 유지) · 프로젝트 수정 또는 하네스 수정
 ```
@@ -504,7 +514,7 @@ git add .harness/core .claude AGENTS.md && git commit -m "chore: 하네스 업�
 - 프로젝트 안의 `.harness/core` 에서 고치지 않는다 (훅이 막고 `check-rules` 가 실패). 템플릿 레포에서 고쳐 릴리스한다.
 - init 은 있는 파일을 덮어쓰지 않으므로, 템플릿 파일(`ci.yml` 등)이 바뀐 릴리스는 CHANGELOG 의 "할 일" 을 보고 직접 옮긴다.
 - 특정 릴리스에 고정: `git -C .harness/core checkout v0.1.0` 후 포인터 커밋. Dependabot PR 은 닫거나 `ignore` 설정.
-- 릴리스 방법(관리자)은 [CONTRIBUTING.md](CONTRIBUTING.md#릴리스).
+- 릴리스 규칙 · 수동 릴리스는 [CONTRIBUTING.md](CONTRIBUTING.md#릴리스).
 
 ---
 
@@ -582,7 +592,7 @@ $ .harness/core/harness stats
 
 ## 17. 템플릿 고치기 · 검증 기록
 
-고치는 방법 · 기준은 [CONTRIBUTING.md](CONTRIBUTING.md), 변경 내역은 [CHANGELOG.md](CHANGELOG.md).
+고치는 방법 · 기준은 [CONTRIBUTING.md](CONTRIBUTING.md), 변경 내역은 `release` 브랜치의 [CHANGELOG.md](https://github.com/irismake/harness-template/blob/release/CHANGELOG.md).
 
 ```sh
 python3 -m unittest discover -s tests -v   # 임시 프로젝트에 설치해 끝까지 — Flutter 불필요, 약 20초
@@ -593,7 +603,7 @@ bash tests/flutter_fixture.sh               # 실제 Flutter 앱 fixture — flu
 
 | 항목 | 방법 | 결과 |
 |---|---|---|
-| 회귀 테스트 22개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 | ✅ (Python 3.9) |
+| 회귀 테스트 24개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 · 자동 릴리스(릴리스 없음 · patch · minor · 깨지는 변경 · 중복 방지 · fast-forward · main 불변 · dry-run) | ✅ (Python 3.9) |
 | 실제 Flutter 앱 | 서브모듈 추가 → init → fvm 3.35.0 · `flutter create` → 린트 템플릿 · Riverpod · go_router · logger · mocktail → 골격 · 규칙 · layers → `harness test` · `run analyze` · `verify` | ✅ 테스트 통과 · 분석 0건 · verify 통과 · `flutter create` 가 `.gitignore` · `AGENTS.md` 를 덮어쓰지 않음 |
 | 위반 검출 (실제 앱) | domain 에 `material.dart` import · `print` · 포맷 깨짐 | ✅ `layer` · `logging` · `dart-format` · `analyze-warning` · `analyze-info` |
 | Claude 규칙 · 스킬 · 역할 로드 | 헤드리스 세션 기록 (Claude Code 2.1.322 · 2.1.328) | ✅ 시작 시 `CLAUDE.md` · `core.md` · `project.md`, `lib/main.dart` 를 읽으면 `architecture.md` · `flutter.md` 추가 (`testing.md` 는 안 읽힘 — 의도대로). 스킬 5 · 역할 2 등록. (2.1.328 은 임시 폴더에서 링크 없는 `CLAUDE.md` 도 읽지 않아 — 폴더 신뢰 · 경로 요인 — 규칙 로드는 2.1.322 로 확인, 스킬 · 역할 등록은 두 버전 모두 확인) |

@@ -35,7 +35,7 @@ jobs:
           submodules: true
       - name: 하네스 버전
         run: |
-          echo "하네스 $(cat .harness/core/VERSION 2>/dev/null || echo '?') ($(git -C .harness/core rev-parse --short HEAD))"
+          echo "하네스 $(cat .harness/core/VERSION 2>/dev/null || echo '개발 중(main)') ($(git -C .harness/core rev-parse --short HEAD))"
           test -f .harness/core/scripts/harness.py || { echo "::error::.harness/core 가 비어 있다 — 서브모듈 checkout 실패"; exit 1; }
       - name: harness verify (PR — 구성 검사 + 변경분 코드 규칙)
         if: github.event_name == 'pull_request'
