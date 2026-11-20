@@ -25,6 +25,14 @@ def main():
     data = json.load(sys.stdin)
     if data.get("stop_hook_active") or not CONFIG_PATH.exists():
         return
+    try:  # 백그라운드 서브에이전트의 위반은 여기서 알린다
+        import guard
+        msg = guard.take_unreported()
+    except Exception:  # noqa: BLE001
+        msg = None
+    if msg:
+        print(json.dumps({"decision": "block", "reason": msg}, ensure_ascii=False))
+        return
     results = [
         run(str(CORE / "scripts/check_rules.py")),
         run(str(CORE / "scripts/check_code.py"), "--lint"),

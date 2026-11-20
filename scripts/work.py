@@ -12,7 +12,7 @@
 라운드      reviewer 호출마다 하네스가 번호를 발급, 4번째는 거부 → 사용자에게 보고
 완료 게이트 (git pre-push · harness work end)
             모든 규모: 지금 트리로 harness verify 통과 기록
-            L 규모   : 최신 리뷰 PASS (보고서 형식) + 리뷰 시작 때 소스 해시 = 지금 소스 해시
+            L 규모 (또는 리뷰를 한 작업): 최신 리뷰 PASS (보고서 형식) · Mutation Guard 위반 없음 + 리뷰 시작 때 소스 해시 = 지금 소스 해시
                        + 지금 트리로 관련 테스트(바뀐 테스트 · 바뀐 코드와 연결된 테스트) 통과 기록
             규모 하한: planner 를 썼거나 risk_areas 를 건드렸거나 layers 두 곳 이상 → L (선언이 작아도)
 자동 종료   게이트 통과 시 사용량 집계 후 작업 공간 삭제. 실패 · 중단이면 남아서 이어서 한다
@@ -236,11 +236,15 @@ def gate(cfg):
     if not any(v["ok"] and v["fp"] == fp_all for v in ev["verify"]):
         problems.append("지금 코드로 `harness verify` 를 통과한 기록이 없다 — 실행해 통과시킨다")
 
-    if lane == "L":
+    if state.get("planner_invalid"):
+        problems.append(f"계획 단계가 Mutation Guard 위반으로 무효다 ({state['planner_invalid'][:120]}) — 사용자에게 보고한다")
+    if lane == "L" or state["rounds"]:  # 리뷰를 했다면 규모와 관계없이 그 리뷰가 유효해야 한다
         if not state["rounds"]:
             problems.append(f"L 규모({why}) — reviewer 검토가 없다. reviewer 를 호출해 PASS 를 받는다")
         else:
             last = state["rounds"][-1]
+            if last.get("invalid"):
+                problems.append(f"리뷰(r{last['n']})가 Mutation Guard 위반으로 무효다 ({last['invalid'][:120]}) — 사용자에게 보고하고 다시 리뷰한다")
             rep = parse_review(last["path"])
             if rep is None:
                 problems.append(f"리뷰 보고서가 없다: {last['path']}")

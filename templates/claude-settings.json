@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.harness/core/scripts/hooks/subagent.py\" ] || { echo \"[하네스] .harness/core 가 비어 있습니다: git submodule update --init\" >&2; exit 0; }; python3 \"$CLAUDE_PROJECT_DIR/.harness/core/scripts/hooks/subagent.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Agent|Task",
@@ -29,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.harness/core/scripts/hooks/subagent_stop.py\" ] || { echo \"[하네스] .harness/core 가 비어 있습니다: git submodule update --init\" >&2; exit 0; }; python3 \"$CLAUDE_PROJECT_DIR/.harness/core/scripts/hooks/subagent_stop.py\"",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.harness/core/scripts/hooks/subagent.py\" ] || { echo \"[하네스] .harness/core 가 비어 있습니다: git submodule update --init\" >&2; exit 0; }; python3 \"$CLAUDE_PROJECT_DIR/.harness/core/scripts/hooks/subagent.py\"",
             "timeout": 30
           }
         ]

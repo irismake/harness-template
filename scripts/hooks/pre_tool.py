@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import events  # noqa: E402
+import guard  # noqa: E402
 import tdd  # noqa: E402
 import work  # noqa: E402
 from lib import LOCAL_DIRS, ROOT, load_config  # noqa: E402
@@ -60,6 +61,12 @@ def main():
     tool_input = data.get("tool_input") or {}
     cfg = load_config()
     session = data.get("session_id")
+    sub_role = data.get("agent_type") if data.get("agent_id") else None
+
+    if sub_role in ROLES and tool in WRITE_TOOLS | {"Bash"}:  # Mutation Guard 사전 차단 (최선 노력)
+        reason = guard.realtime(cfg, sub_role, tool, tool_input)
+        if reason:
+            decide("deny", reason)
 
     if tool in AGENT_TOOLS:
         role = tool_input.get("subagent_type")
@@ -83,7 +90,8 @@ def main():
                 decide("ask", reason)
     elif tool in WRITE_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        _ensure_work(path, session)
+        if not sub_role:
+            _ensure_work(path, session)
         for pattern in rules.get("file_allow", []):
             if re.search(pattern, path):
                 sys.exit(0)
@@ -105,6 +113,7 @@ def _ensure_work(path, session):
         return
     if not rel.startswith((*LOCAL_DIRS, ".harness/core/", ".git/")):
         work.ensure("claude", session)
+        guard.note_main_write(rel)
 
 
 def tdd_gate(cfg, path):

@@ -893,5 +893,128 @@ class WorkTest(unittest.TestCase):
         self.assertEqual(self.p.harness("check-rules", check=False).returncode, 0)
 
 
+
+class GuardTest(unittest.TestCase):
+    """Mutation Guard — 사후 검출(보장) · 사전 차단(최선 노력)"""
+
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.write("pubspec.yaml", "name: my_app\n")
+        self.p.write(CHAT, "void send() {}\n")
+        self.p.write(CHAT_TEST, "// EXPECT x y\n")
+        self.assertEqual(self.p.commit("chore: 설치", verify=False).returncode, 0)
+        self.p.run("git", "switch", "-q", "-c", "feat/x")
+        self.p.write("lib/dirty.dart", "int dirty = 1;\n")   # 호출 전부터 있던 사용자 변경 (baseline)
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def hook(self, name, **payload):
+        return self.p.hook(name, payload)
+
+    def start(self, role, aid="agent1"):
+        self.hook("subagent", hook_event_name="SubagentStart", agent_id=aid, agent_type=role, session_id="s1")
+
+    def stop(self, aid="agent1"):
+        self.hook("subagent", hook_event_name="SubagentStop", agent_id=aid, agent_type="x", session_id="s1")
+
+    def returned(self):
+        r = self.hook("post_edit", tool_name="Agent", tool_input={"subagent_type": "reviewer"})
+        return json.loads(r.stdout)["reason"] if r.stdout.strip() else None
+
+    def sub_tool(self, role, tool, **inp):
+        out = self.hook("pre_tool", tool_name=tool, agent_id="agent1", agent_type=role, tool_input=inp).stdout.strip()
+        return json.loads(out)["hookSpecificOutput"] if out else {"permissionDecision": "allow"}
+
+    def test_planner_violation_detected_and_not_reverted(self):
+        self.start("planner")
+        self.p.write("lib/features/chat/domain/chat.dart", "void send() { /* planner */ }\n")   # 셸로 썼다고 가정
+        self.stop()
+        msg = self.returned()
+        self.assertIn("사후 검출", msg)
+        self.assertIn("lib/features/chat/domain/chat.dart", msg)
+        self.assertNotIn("lib/dirty.dart", msg, "baseline 변경은 허용")
+        self.assertIn("planner", (self.p.root / CHAT).read_text(), "되돌리지 않는다")
+        self.assertIsNone(self.returned(), "한 번만 알린다")
+        st = json.loads((self.p.root / ".harness/_workspace/feat-x/run.json").read_text())
+        self.assertIn("planner_invalid", st)
+
+    def test_planner_clean_run(self):
+        self.start("planner")
+        (self.p.root / ".harness/_workspace/feat-x/plan.md").write_text("# plan\n")
+        self.stop()
+        self.assertIsNone(self.returned())
+
+    def test_reviewer_may_add_tests_but_not_touch_existing(self):
+        self.start("reviewer")
+        self.p.write("test/features/chat/domain/chat_edge_test.dart", "// new\n")
+        self.stop()
+        self.assertIsNone(self.returned(), "새 테스트 파일은 허용")
+
+        self.start("reviewer", "agent2")
+        self.p.write(CHAT_TEST, "// 약화\n")
+        self.stop("agent2")
+        self.assertIn("기존 테스트를 고치거나 지웠다", self.returned())
+
+        self.start("reviewer", "agent3")
+        (self.p.root / CHAT_TEST).unlink()
+        self.stop("agent3")
+        self.assertIn("기존 테스트를 고치거나 지웠다", self.returned())
+
+    def test_commit_and_stage_detected(self):
+        self.start("reviewer")
+        self.p.run("git", "add", "lib/dirty.dart")
+        self.stop()
+        self.assertIn("stage(index)", self.returned())
+        self.start("reviewer", "agent2")
+        self.p.run("git", "commit", "-q", "--no-verify", "-m", "chore: x")
+        self.stop("agent2")
+        self.assertIn("HEAD 변경", self.returned())
+
+    def test_main_agent_edits_during_background_review_are_excluded(self):
+        self.start("reviewer")
+        self.hook("pre_tool", tool_name="Edit", session_id="s1", tool_input={"file_path": str(self.p.root / CHAT)})  # 메인
+        self.p.write(CHAT, "void send() { /* main */ }\n")
+        self.stop()
+        self.assertIsNone(self.returned())
+
+    def test_realtime_block_is_labelled_best_effort(self):
+        d = self.sub_tool("planner", "Write", file_path=str(self.p.root / CHAT))
+        self.assertEqual(d["permissionDecision"], "deny")
+        self.assertIn("사전 차단", d["permissionDecisionReason"])
+        self.assertEqual(self.sub_tool("planner", "Write", file_path=str(self.p.root / ".harness/_workspace/feat-x/plan.md"))["permissionDecision"], "allow")
+        self.assertEqual(self.sub_tool("reviewer", "Edit", file_path=str(self.p.root / CHAT_TEST))["permissionDecision"], "deny")
+        self.assertEqual(self.sub_tool("reviewer", "Write", file_path=str(self.p.root / "test/new_test.dart"))["permissionDecision"], "allow")
+        self.assertEqual(self.sub_tool("reviewer", "Bash", command="flutter test && git commit -am x")["permissionDecision"], "deny")
+        self.assertEqual(self.sub_tool("reviewer", "Bash", command="git diff main && git status")["permissionDecision"], "allow")
+
+    def test_violation_invalidates_review_round_in_gate(self):
+        self.p.decision({"tool_name": "Agent", "session_id": "s1", "tool_input": {"subagent_type": "reviewer"}})
+        self.start("reviewer")
+        self.p.write(CHAT, "void send() { /* reviewer */ }\n")
+        self.stop()
+        out = subprocess.run([sys.executable, ".harness/core/scripts/work.py", "gate"], cwd=self.p.root, capture_output=True, text=True, env=ENV).stdout
+        self.assertIn("Mutation Guard 위반으로 무효", out)
+
+    def test_stop_hook_reports_background_violation(self):
+        self.start("reviewer")
+        self.p.write(CHAT, "void send() { /* bg */ }\n")
+        self.stop()
+        out = json.loads(self.hook("stop").stdout)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("역할 위반", out["reason"])
+
+    def test_disabled(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["guard"] = {"enabled": False}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.start("planner")
+        self.p.write(CHAT, "void send() { /* off */ }\n")
+        self.stop()
+        self.assertIsNone(self.returned())
+        self.assertEqual(self.sub_tool("planner", "Write", file_path=str(self.p.root / CHAT))["permissionDecision"], "allow")
+
+
 if __name__ == "__main__":
     unittest.main()
