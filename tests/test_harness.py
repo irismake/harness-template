@@ -166,6 +166,67 @@ class CheckCodeTest(unittest.TestCase):
         self.p.write("lib/old.dart", 'void f() { print("old"); }\nint g() => 1;\n')
         self.assertEqual(self.p.harness("check-code", "--base", "HEAD", check=False).returncode, 0)
 
+    # ── 설정 값 리터럴 (config-literal) — 코드 · 테스트가 같은 상수를 쓰는지 ──
+
+    def enable_config_literals(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["config_literals"] = {"enabled": True}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+
+    CONFIG_LITERAL_CODE = (
+        "Dio dio() => Dio(BaseOptions(\n"
+        "  connectTimeout: const Duration(seconds: 10),\n"   # 2: 잡음 — 설정에 리터럴
+        "  receiveTimeout: NetworkTimeouts.receive,\n"
+        "));\n"
+    )
+
+    def test_config_literal_is_off_by_default(self):
+        self.p.write("lib/core/network/dio.dart", self.CONFIG_LITERAL_CODE)
+        self.assertNotIn("[config-literal]", self.check().stdout)
+
+    def test_config_literal_in_code(self):
+        self.enable_config_literals()
+        self.p.write("lib/core/network/dio.dart", self.CONFIG_LITERAL_CODE)
+        self.p.write("lib/core/constants/network_constants.dart",
+                     "abstract final class NetworkTimeouts {\n"
+                     "  static const Duration connect = Duration(seconds: 10);\n"  # 상수 선언 — 허용
+                     "  static const receive = Duration(seconds: 10);\n"
+                     "}\n"
+                     "const debounce = Duration(milliseconds: 300);\n"
+                     "final startedAt = Duration.zero;\n")
+        self.p.write("lib/a.g.dart", "final x = f(const Duration(seconds: 1));\n")  # 생성 파일 — 허용
+        self.p.write("lib/b.dart", "// 예: connectTimeout: Duration(seconds: 3)\nvoid f() {}\n")  # 주석 — 허용
+        out = self.check().stdout
+        self.assertIn("[config-literal] lib/core/network/dio.dart:2", out)
+        self.assertEqual(out.count("[config-literal]"), 1, out)
+
+    def test_config_literal_in_test_expectations(self):
+        self.enable_config_literals()
+        self.p.write("test/core/network/dio_test.dart",
+                     "void main() {\n"
+                     "  expect(dio.options.connectTimeout, const Duration(seconds: 10));\n"  # 2: 잡음
+                     "  expect(\n"
+                     "    dio.options.receiveTimeout,\n"
+                     "    const Duration(seconds: 10),\n"                                    # 5: 잡음 (여러 줄 expect)
+                     "  );\n"
+                     "  expect(dio.options.sendTimeout, NetworkTimeouts.send);\n"            # 상수 참조 — 허용
+                     "  expect(parseDuration('1s'), const Duration(seconds: 1));\n"          # 동작 결과 — 허용
+                     "  final e = DioException.connectionTimeout(\n"
+                     "    timeout: const Duration(seconds: 10),\n"                            # 가짜 예외 인자 — 허용
+                     "  );\n"
+                     "}\n")
+        out = self.check().stdout
+        self.assertIn("[config-literal] test/core/network/dio_test.dart:2", out)
+        self.assertIn("[config-literal] test/core/network/dio_test.dart:5", out)
+        self.assertEqual(out.count("[config-literal]"), 2, out)
+
+    def test_config_literal_ignores_existing_lines(self):
+        self.p.write("lib/core/network/dio.dart", self.CONFIG_LITERAL_CODE)
+        self.p.commit("chore: old", verify=False)  # 검사를 켜기 전 코드
+        self.enable_config_literals()
+        self.p.write("lib/core/network/dio.dart", self.CONFIG_LITERAL_CODE + "int g() => 1;\n")
+        self.assertNotIn("[config-literal]", self.p.harness("check-code", "--base", "HEAD", check=False).stdout)
+
     def test_project_checks_module(self):
         self.p.write(".harness/checks.py",
                      "def check(ctx):\n"

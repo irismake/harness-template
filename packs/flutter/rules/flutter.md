@@ -16,6 +16,10 @@ paths:
 - `analysis_options.yaml` 의 규칙을 끄거나 `// ignore:` 를 넣으려면 이유를 적고 사용자 승인을 받는다.
 - 생성 파일(`*.g.dart` · `*.freezed.dart` · `*.gr.dart` · `*.config.dart` · `*.mocks.dart`)은 직접 고치지 않는다. 원본을 고치고 `.harness/core/harness run codegen`.
 
+## 설정 값
+
+- 타임아웃 · 재시도 횟수 · 크기 제한 같은 고정 설정 값은 상수 한 곳(예: `lib/core/constants/<영역>_constants.dart`)에 두고, 코드 · 테스트가 같은 상수를 쓴다. 코드에 `Duration(...)` 같은 값을 직접 넣지 않는다. (검사: `config-literal`, `config.json` `config_literals.enabled` 로 켠다)
+
 ## 로깅 · 오류
 
 - `print` · `debugPrint` 를 쓰지 않는다. 프로젝트 로거(`project.md` 결정)를 쓴다. (검사: `logging`)

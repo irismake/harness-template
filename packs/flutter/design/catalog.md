@@ -141,6 +141,7 @@ Firebase / Supabase: SDK 호출은 `data/` 의 데이터 소스 안에만. 화�
 | 테스트 정책 | **도메인 · 상태 · 데이터 변환은 TDD 필수, 화면은 핵심 위젯 테스트 (추천)** · 로직만 · 위젯까지 전부 | `architecture.md` · 팩 `testing.md` |
 | TDD Guard (강제) | **켬 — TDD 필수 범위의 기능 코드는 실패하는 테스트를 실행한 뒤에만 고칠 수 있다 (추천)** · 끔 — 절차 안내만 | `config.json` `tdd` (아래) |
 | 목 도구 | **mocktail (추천: 코드 생성 없음)** · mockito(+ build_runner) · 직접 만든 가짜 구현 | dev 의존성 |
+| 설정 값 리터럴 검사 | **켬 — 코드의 `Duration(...)` 리터럴 · 설정 값을 리터럴과 비교하는 테스트를 잡는다 (추천)** · 끔 | `config.json` `"config_literals": {"enabled": true}`, 상수 위치는 `lib/core/constants/` |
 | CI 범위 | **하네스 검사 + 포맷 · 분석 · 테스트 (추천)** · + Android · iOS 빌드 확인 · + 배포(스토어) 자동화는 나중에 따로 | `.github/workflows/ci.yml` |
 
 TDD Guard 를 켜면 `config.json` 에 테스트 정책의 "TDD 필수" 범위를 경로로 쓴다. UI · 문구 · 테마는 넣지 않는다.
