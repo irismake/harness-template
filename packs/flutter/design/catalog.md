@@ -164,4 +164,4 @@ TDD Guard 를 켜면 `config.json` 에 테스트 정책의 "TDD 필수" 범위�
 | `.harness/rules/architecture.md` | `paths: ["lib/**"]` — 폴더 구조 · 계층 · 의존 방향 · 상태 관리 · 라우팅 · DI · 로깅 · 오류 처리 (위 "규칙에 쓸 것" 중 고른 것만) |
 | `.harness/rules/data.md` | `paths:` 데이터 폴더 (예: `lib/features/**/data/**` · `lib/core/network/**`) — 네트워크 · DTO/엔티티 · 저장소 · 토큰 저장 (백엔드 · 저장소가 있을 때만) |
 | `.harness/config.json` | `design_done: true` · `base_branch` · `protected_branches` · `layers` · `risk_areas`(예: `lib/core/network/**`, 인증 폴더) · `tdd`(TDD Guard 를 켰으면) |
-| 앱 골격 | `flutter create` → `analysis_options.yaml`(팩 템플릿) → 패키지 → 폴더 구조 · 앱 시작 코드 · 라우터 · 테마 · 로거 → 스모크 테스트 |
+| 앱 골격 | `config.json`(`tdd` 포함)을 먼저 쓴 뒤 `flutter create` → `analysis_options.yaml`(팩 템플릿) → 패키지 → 폴더 구조 · 앱 시작 코드 · 라우터 · 테마 · 로거 → 스모크 테스트. TDD Guard 대상 경로(네트워크 클라이언트 · 저장소 · 상태)의 코드는 만들지 않고 첫 기능에서 테스트부터 만든다 |

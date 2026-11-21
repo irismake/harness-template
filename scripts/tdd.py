@@ -8,7 +8,10 @@ TDD Guard — 테스트가 먼저 실패한 증거가 있어야 기능 코드를
 
   편집 잠금 해제   연결된 테스트에 RED(fail 또는 load_error) 기록이 있다            → Claude 실행 전 훅이 확인
   완료 조건        연결된 테스트 하나가 behavior RED(fail) → 그 뒤 GREEN(pass) 이고,
+                  RED · GREEN 의 테스트 내용은 같고 대상 내용은 다르며 (구현이 바뀌어 통과),
                   GREEN 때의 대상 · 테스트 내용이 지금과 같다                       → 종료 전 훅 · verify · pre-commit
+  Bash 감지       Bash 명령 전후로 HEAD 와 다른 대상 파일의 내용을 비교해, 명령이 RED 없이 대상을 바꿨으면 바로 알린다
+                  (Claude 실행 전 · 후 훅 — 비교 파일은 명령마다 하나, 끝나면 지운다)
   예외            harness tdd skip <파일> --reason …  (사용자 확인 · .harness/tdd-skip.json 커밋 · 파일 내용이 바뀌면 무효)
   재사용 방지      커밋하면 그 파일들의 기록을 지운다 (post-commit) — 다음 변경은 새 RED 가 필요하다
   CI              harness tdd ci --base <ref> — 바뀐 테스트를 변경 전 코드에서 실행해 실패(RED 재현), 변경 후 통과(GREEN) 확인
@@ -19,15 +22,17 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib import HARNESS, OUT, ROOT, git, glob_regex, load_checks, load_config, tracked_files  # noqa: E402
+from lib import HARNESS, OUT, ROOT, git, glob_regex, has_head, load_checks, load_config, tracked_files  # noqa: E402
 
 STATE = OUT / "tdd.json"
 SKIP = HARNESS / "tdd-skip.json"
@@ -165,30 +170,85 @@ def unlocked(cfg, src):
     return False, tests, "RED 미확인"
 
 
+# ── Bash 감지: 명령 전후 비교 ─────────────────────────────
+# 수정 시각이 아니라 내용으로 비교한다 (mv · cp -p 는 시각을 보존해 놓친다).
+# 비교 대상은 HEAD 와 다른 대상 파일뿐이라 평소에는 비어 있거나 몇 개다.
+
+BASH_DIR = OUT / "bash"
+
+
+def _dirty_guarded(cfg):
+    """{경로: 내용 해시} — HEAD 와 다르거나 추적 안 된 대상 파일 (삭제 제외)"""
+    paths = set(git("diff", "--name-only", "HEAD", check=False).split("\n")) if has_head() else set()
+    paths |= set(git("ls-files", "--others", "--exclude-standard", check=False).split("\n"))
+    return {p: digest(content(p)) for p in sorted(paths) if p and is_guarded(cfg, p) and (ROOT / p).is_file()}
+
+
+def _snapshot_file(tool_use_id):
+    return BASH_DIR / (re.sub(r"[^A-Za-z0-9_-]", "_", tool_use_id or "last")[:100] + ".json")
+
+
+def bash_before(cfg, tool_use_id):
+    """Bash 실행 전 훅: 지금 상태를 남긴다 (Guard 가 꺼져 있으면 아무것도 하지 않는다)"""
+    if not enabled(cfg):
+        return
+    BASH_DIR.mkdir(parents=True, exist_ok=True)
+    _snapshot_file(tool_use_id).write_text(json.dumps(_dirty_guarded(cfg)))
+
+
+def bash_after(cfg, tool_use_id):
+    """Bash 실행 후 훅: 이 명령이 RED 없이 바꾼 대상 파일 목록. 실행 전 상태가 없으면 HEAD 와 다른 대상 전부를 본다."""
+    if not enabled(cfg):
+        return []
+    snap = _snapshot_file(tool_use_id)
+    try:
+        before = json.loads(snap.read_text())
+    except (OSError, ValueError):
+        before = {}
+    snap.unlink(missing_ok=True)
+    cutoff = time.time() - 3600  # 실행 전 훅이 차단해 후 훅이 오지 않은 명령의 남은 파일
+    for old in BASH_DIR.glob("*.json") if BASH_DIR.exists() else []:
+        if old.stat().st_mtime < cutoff:
+            old.unlink(missing_ok=True)
+    changed = [p for p, h in _dirty_guarded(cfg).items() if before.get(p) != h]
+    return [p for p in changed if not unlocked(cfg, p)[0]]
+
+
 def cycle(cfg, src, staged=False):
-    """(완료 여부, 메시지) — behavior RED → GREEN, GREEN 때 내용 = 지금 내용"""
+    """(완료 여부, 메시지) — behavior RED → GREEN, GREEN 때 내용 = 지금 내용
+
+    GREEN 으로 인정하려면 그 전에 **같은 테스트 내용**으로 실패한 기록이 있고, 그때의 대상 내용이 GREEN 때와 달라야 한다
+    (테스트는 그대로 · 구현이 바뀌어 통과). 테스트만 고쳐 통과시키거나, 테스트를 바꾼 뒤 RED 를 다시 보지 않은 것은 인정하지 않는다.
+    """
     now = content(src, staged=staged)
     if skip_valid(src, now):
         return True, "예외(tdd-skip)"
     tests = linked_tests(cfg, src)
     if not tests:
         return False, "연결된 테스트가 없다 — 이 파일을 import 하는 테스트를 먼저 쓴다"
-    behavior_red = {t: False for t in tests}
-    load_red = stale_green = False
+    reds = {t: [] for t in tests}  # 테스트별 behavior RED 때의 (테스트 해시, 대상 해시)
+    load_red = stale_green = unproven_green = False
     for run in load_state()["runs"]:
         for t in tests:
             st = run["results"].get(t)
             if st == "fail":
-                behavior_red[t] = True
+                reds[t].append((run["hashes"].get(t), run["hashes"].get(src)))
             elif st == "load_error":
                 load_red = True
-            elif st == "pass" and behavior_red[t]:
-                if run["hashes"].get(src) == digest(now) and run["hashes"].get(t) == digest(content(t, staged=staged)):
+            elif st == "pass" and reds[t]:
+                t_hash, src_hash = run["hashes"].get(t), run["hashes"].get(src)
+                if not any(rt == t_hash and rs != src_hash for rt, rs in reds[t]):
+                    unproven_green = True
+                elif src_hash == digest(now) and t_hash == digest(content(t, staged=staged)):
                     return True, f"RED → GREEN: {t}"
-                stale_green = True
+                else:
+                    stale_green = True
     if stale_green:
         return False, "GREEN 이후 코드 · 테스트가 바뀌었다 — harness test 로 다시 통과를 확인한다"
-    if any(behavior_red.values()):
+    if unproven_green:
+        return False, ("RED 이후 구현이 바뀌지 않았다 — 지금 테스트로 실패(RED)를 확인한 뒤 구현을 바꿔 통과시킨다 "
+                       "(테스트만 고쳐 통과시키거나 테스트를 바꾼 뒤 RED 를 다시 보지 않은 것은 RED → GREEN 이 아니다)")
+    if any(reds.values()):
         return False, "RED 뒤 GREEN 이 없다 — 구현 후 harness test 로 통과를 확인한다"
     if load_red:
         return False, "컴파일 실패(RED)만 있다 — 골격을 만든 뒤 테스트가 실행돼 실패(behavior RED)하는 것을 확인한다"
