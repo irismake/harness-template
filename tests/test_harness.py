@@ -659,6 +659,33 @@ class TddGuardTest(unittest.TestCase):
         self.assertEqual(self.test(CHAT_TEST).returncode, 0)     # 테스트 v2 로는 실패한 적이 없다
         self.assertTrue(any("RED 이후 구현이 바뀌지 않았다" in l for l in self.tdd_problems()), self.tdd_problems())
 
+    def test_import_only_change_after_green_completes(self):
+        # 정상 흐름: GREEN 뒤 공용 타입을 옮겨 테스트의 import 줄만 바뀜 (본문 · 검증 그대로, 구현 불변)
+        body = f"// EXPECT {CHAT} send\n"
+        self.p.write(CHAT_TEST, body + "import 'package:my_app/features/chat/domain/chat.dart';\n")
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.p.write(CHAT_TEST, body + "import 'package:my_app/features/chat/domain/chat.dart';\n"
+                                       "import 'package:collection/collection.dart';\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+
+    def test_body_change_after_green_without_red_is_blocked(self):
+        # 본문(검증)이 바뀌었는데 그 테스트로 RED 를 본 적이 없으면 미완료 — import 무시가 우회로가 되지 않는다
+        imports = "import 'package:my_app/features/chat/domain/chat.dart';\n"
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} send\n" + imports)
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.p.write(CHAT, "void send() {}\nvoid sendAll() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} sendAll\n" + imports)  # 이미 있는 동작으로 기대를 바꿈
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        # 다시 실행해도 풀리지 않으므로 "다시 통과를 확인" 이 아니라 RED 가 없다는 사실을 알린다
+        self.assertTrue(any(CHAT in l and "RED 이후 구현이 바뀌지 않았다" in l for l in self.tdd_problems()),
+                        self.tdd_problems())
+
     def test_formatting_test_after_red_still_completes(self):
         # 정상 흐름: RED 뒤 테스트에 포맷(공백 · 줄바꿈)만 적용하고 구현 → GREEN
         self.write_chat_test("send")
@@ -710,6 +737,7 @@ class TddGuardTest(unittest.TestCase):
         state = json.loads(state_file.read_text())
         for run in state["runs"]:
             run.pop("shapes", None)
+            run.pop("bodies", None)
         state_file.write_text(json.dumps(state))
         self.assertEqual(self.tdd_problems(), [])
 
