@@ -8,7 +8,7 @@ TDD Guard — 테스트가 먼저 실패한 증거가 있어야 기능 코드를
 
   편집 잠금 해제   연결된 테스트에 RED(fail 또는 load_error) 기록이 있다            → Claude 실행 전 훅이 확인
   완료 조건        연결된 테스트 하나가 behavior RED(fail) → 그 뒤 GREEN(pass) 이고,
-                  RED · GREEN 의 테스트는 같고(공백 차이 무시) 그 사이 연결된 대상 파일이 바뀌었으며 (구현이 바뀌어 통과),
+                  RED · GREEN 의 테스트는 같고(공백 · import 경로 차이 무시) 그 사이 연결된 대상 파일이 바뀌었으며 (구현이 바뀌어 통과),
                   GREEN 때의 대상 · 테스트 내용이 지금과 같다                       → 종료 전 훅 · verify · pre-commit
   Bash 감지       Bash 명령 전후로 HEAD 와 다른 대상 파일의 내용을 비교해, 명령이 RED 없이 대상을 바꿨으면 바로 알린다
                   (Claude 실행 전 · 후 훅 — 비교 파일은 명령마다 하나, 끝나면 지운다)
@@ -81,6 +81,14 @@ def shape(text):
     return digest(re.sub(r"\s+", "", text)) if text is not None else None
 
 
+DIRECTIVE_RE = re.compile(r"^\s*(?:import|export|part(?:\s+of)?)\s+['\"].*$", re.M)
+
+
+def body(text):
+    """import · export · part 줄과 공백을 뺀 내용의 해시 — 옮긴 공용 타입의 import 경로만 바뀐 테스트를 같은 테스트로 본다."""
+    return shape(DIRECTIVE_RE.sub("", text)) if text is not None else None
+
+
 def content(rel, root=ROOT, staged=False):
     if staged:
         r = subprocess.run(["git", "-C", str(root), "show", f":{rel}"], capture_output=True, text=True)
@@ -129,12 +137,13 @@ def record_run(cfg, results):
     guarded = [f for f in files if is_guarded(cfg, f)]
     hashes = {t: digest(content(t)) for t in results}
     shapes = {t: shape(content(t)) for t in results}
+    bodies = {t: body(content(t)) for t in results}
     for src in guarded:
         if set(linked_tests(cfg, src, files=files)) & set(results):
             hashes[src] = digest(content(src))
     state = load_state()
     state["runs"].append({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "results": results,
-                          "hashes": hashes, "shapes": shapes})
+                          "hashes": hashes, "shapes": shapes, "bodies": bodies})
     state["runs"] = state["runs"][-200:]
     save_state(state)
 
@@ -239,10 +248,12 @@ def cycle(cfg, src, staged=False):
     linked = {}  # 대상 파일 → 연결된 테스트 (판정 중 한 번만 찾는다)
 
     def same_test(red, run, t):
-        rs, gs = (red.get("shapes") or {}).get(t), (run.get("shapes") or {}).get(t)
-        if rs is not None and gs is not None:
-            return rs == gs
-        return red["hashes"].get(t) == run["hashes"].get(t)  # 테스트 모양 해시가 없는 이전 기록
+        # 두 기록이 모두 가진 가장 너그러운 비교를 쓴다: 본문(import 무시) → 모양(공백 무시) → 원문 (이전 기록 호환)
+        for key in ("bodies", "shapes"):
+            rs, gs = (red.get(key) or {}).get(t), (run.get(key) or {}).get(t)
+            if rs is not None and gs is not None:
+                return rs == gs
+        return red["hashes"].get(t) == run["hashes"].get(t)
 
     def impl_changed(red, run, t):
         for f in set(red["hashes"]) | set(run["hashes"]):
@@ -255,7 +266,7 @@ def cycle(cfg, src, staged=False):
         return False
 
     reds = {t: [] for t in tests}  # 테스트별 behavior RED 기록
-    load_red = stale_green = unproven_green = False
+    load_red = stale_green = unproven_green = current_unproven = False
     for run in load_state()["runs"]:
         for t in tests:
             st = run["results"].get(t)
@@ -265,13 +276,16 @@ def cycle(cfg, src, staged=False):
                 load_red = True
             elif st == "pass" and reds[t]:
                 t_hash, src_hash = run["hashes"].get(t), run["hashes"].get(src)
+                current = src_hash == digest(now) and t_hash == digest(content(t, staged=staged))
                 if not any(same_test(red, run, t) and impl_changed(red, run, t) for red in reds[t]):
                     unproven_green = True
-                elif src_hash == digest(now) and t_hash == digest(content(t, staged=staged)):
+                    current_unproven = current_unproven or current
+                elif current:
                     return True, f"RED → GREEN: {t}"
                 else:
                     stale_green = True
-    if stale_green:
+    # 지금 내용으로 이미 통과했는데 증명이 없으면, 다시 실행하라는 안내는 소용없다 — RED 가 없다는 사실을 먼저 알린다
+    if stale_green and not current_unproven:
         return False, "GREEN 이후 코드 · 테스트가 바뀌었다 — harness test 로 다시 통과를 확인한다"
     if unproven_green:
         return False, ("RED 이후 구현이 바뀌지 않았다 — 지금 테스트로 실패(RED)를 확인한 뒤 구현을 바꿔 통과시킨다 "
