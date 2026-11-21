@@ -1,7 +1,7 @@
 """
 Flutter 팩 검사 — check_code.py 가 불러 쓴다. (형식은 프로젝트 검사 .harness/checks.py 의 예시이기도 하다)
 
-  check(ctx)       추가된 줄에서 규칙 위반 찾기          logging · sensitive-log
+  check(ctx)       추가된 줄에서 규칙 위반 찾기          logging · sensitive-log · config-literal(켰을 때)
   lint(ctx, paths) 바뀐 Dart 파일에 dart format · dart analyze (CI 와 같은 설정, 도구가 없으면 건너뜀)
   post_edit_match  Claude 편집 직후 훅이 검사할 파일인지
   command_vars     harness test 명령의 {flutter} · {dart} 값 (.fvmrc 가 있으면 fvm 사용)
@@ -23,12 +23,42 @@ SENSITIVE_RE = re.compile(r"(?i)(token|password|passwd|secret|authorization|cook
 MASKED_RE = re.compile(r"(?i)mask|redact|length|isEmpty|isNotEmpty|!= null|== null")
 
 
+TESTING_RULE = ".harness/core/packs/flutter/rules/testing.md"
+# config-literal — 설정 값(타임아웃 등)을 상수 한 곳에 두고 코드 · 테스트가 같은 상수를 참조하는지 (config_literals.enabled)
+DURATION_RE = re.compile(r"(?<![\w.])(?:const\s+)?Duration\(")
+CONST_DECL_RE = re.compile(r"^\s*(?:static\s+)?(?:const|final)\s+(?:[\w<>?,\s]+\s+)?\w+\s*=")
+EXPECT_DURATION_RE = re.compile(r"expect\(\s*([^;]*?),\s*(?:const\s+)?Duration\(")
+CONFIG_NAME_RE = re.compile(r"(?i)timeout|interval|delay|debounce|throttle|ttl|expir")
+
+
 def _is_source(ctx, path):
     return path.endswith(".dart") and not GENERATED.search(path) and path.startswith(tuple(ctx.cfg.get("source_dirs", ["lib/"])))
 
 
+def _config_literals(ctx, path, lines):
+    """코드: 상수 선언 밖의 Duration 리터럴. 테스트: 설정 값(timeout 등)을 Duration 리터럴과 비교하는 expect."""
+    if is_test(path):
+        text = (ctx.root / path).read_text(errors="ignore")
+        added = {no for no, _ in lines}
+        for m in EXPECT_DURATION_RE.finditer(text):
+            if not CONFIG_NAME_RE.search(m.group(1)):
+                continue  # 동작 결과 비교는 기대값을 직접 적는다
+            no = text.count("\n", 0, m.end()) + 1
+            if no in added:
+                ctx.report("config-literal", path, no,
+                           "설정 값은 코드와 같은 상수를 참조해 비교한다 (값을 두 곳에 적지 않는다)", TESTING_RULE)
+    elif _is_source(ctx, path):
+        for no, text in lines:
+            if not ctx.is_comment(text) and DURATION_RE.search(text) and not CONST_DECL_RE.match(text):
+                ctx.report("config-literal", path, no,
+                           "설정 값은 상수(예: lib/core/constants/)로 두고 그 상수를 쓴다", RULE)
+
+
 def check(ctx):
+    config_literals = (ctx.cfg.get("config_literals") or {}).get("enabled")
     for path, lines in sorted(ctx.added.items()):
+        if config_literals and path.endswith(".dart") and not GENERATED.search(path):
+            _config_literals(ctx, path, lines)
         if not _is_source(ctx, path):
             continue
         for no, text in lines:

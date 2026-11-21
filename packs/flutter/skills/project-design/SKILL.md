@@ -65,7 +65,7 @@ description: 새 Flutter 앱의 설계부터 시작한다 — 무엇을 만들�
 순서대로 하고, 실패하면 멈추고 보고한다.
 
 1. **결정 기록**: `.harness/decisions/0001-initial-design.md` (`decisions/README.md` 형식 — 모든 주제의 선택 · 대안 · 이유).
-2. **설정** (`.harness/config.json`) — **골격보다 먼저** 쓴다 (TDD Guard · 계층 검사가 골격부터 적용되게): `base_branch` · `protected_branches` · `layers`(카탈로그 B2) · `risk_areas`(네트워크 · 인증 · 결제 폴더) · `tdd`(카탈로그 D — TDD Guard 를 켰으면 대상 경로). `design_done` 은 아직 `false` 로 두고 6단계 끝에서 `true` 로 바꾼다.
+2. **설정** (`.harness/config.json`) — **골격보다 먼저** 쓴다 (TDD Guard · 계층 검사가 골격부터 적용되게): `base_branch` · `protected_branches` · `layers`(카탈로그 B2) · `risk_areas`(네트워크 · 인증 · 결제 폴더) · `tdd`(카탈로그 D — TDD Guard 를 켰으면 대상 경로) · `config_literals`(카탈로그 D). `design_done` 은 아직 `false` 로 두고 6단계 끝에서 `true` 로 바꾼다.
 3. **앱 골격** (기존 앱이면 건너뜀)
    - fvm 을 골랐으면 `fvm use <버전> --force` → `.fvmrc`. 이후 `flutter` · `dart` 명령은 `fvm` 을 붙인다.
    - `flutter create --org <조직 ID> --project-name <패키지 이름> --platforms <고른 플랫폼> .`
