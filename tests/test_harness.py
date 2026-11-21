@@ -5,15 +5,18 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 TEMPLATE = Path(__file__).resolve().parents[1]
-ENV = {k: v for k, v in os.environ.items() if k not in {"HARNESS_SOURCE", "HARNESS_PROJECT_ROOT", "GITHUB_ACTIONS"}}
+ENV = {k: v for k, v in os.environ.items()
+       if k not in {"HARNESS_SOURCE", "HARNESS_PROJECT_ROOT", "GITHUB_ACTIONS", "CLAUDECODE", "HARNESS_AGENT"} and not k.startswith(("CODEX_", "CLAUDE_CODE"))}
 ENV.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
 
 
@@ -464,7 +467,10 @@ from pathlib import Path
 def run_tests(root, targets):
     # 가짜 실행기: 테스트의 'EXPECT <파일> <문자열>' — 파일이 없으면 load_error, 문자열이 없으면 fail
     root = Path(root)
-    files = targets or [p.relative_to(root).as_posix() for p in (root / "test").rglob("*_test.dart")]
+    files = []
+    for t in targets or ["test"]:
+        p = root / t
+        files += [x.relative_to(root).as_posix() for x in p.rglob("*_test.dart")] if p.is_dir() else [t]
     out = {}
     for t in files:
         status = "pass"
@@ -707,6 +713,564 @@ class TraceabilityTest(unittest.TestCase):
         self.p.write("tests/test_chat.py", TEST_PY.replace('"CHAT-TS-002"', '"CHAT-TS-999"'))
         self.assertIn("꺼짐", self.trace().stdout)
         self.assertNotIn("[trace]", self.p.harness("check-code", check=False).stdout)
+
+
+AGENT_ENV = {**ENV, "HARNESS_AGENT": "1"}
+PASS_REPORT = "판정: PASS\n등급: BLOCKER 0 · MAJOR 0 · MINOR 1 · 미검증(필수) 0\n검사: verify PASS · test PASS (1개)\n"
+
+
+class WorkTest(unittest.TestCase):
+    """작업 구간 — 자동 시작 · 라운드 · 완료 게이트(실행 기록 · 해시) · 자동 종료 · 안전한 정리 · settings 동기화"""
+
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.write("pubspec.yaml", "name: my_app\n")
+        self.p.write(".harness/checks.py", FAKE_RUNNER)
+        self.set_cfg(risk_areas=["lib/features/pay/**"])
+        self.assertEqual(self.p.commit("chore: 설치", verify=False).returncode, 0)
+        self.p.run("git", "switch", "-q", "-c", "feat/chat")
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def set_cfg(self, **kv):
+        path = self.p.root / ".harness/config.json"
+        cfg = json.loads(path.read_text())
+        cfg.update(kv)
+        path.write_text(json.dumps(cfg))
+
+    def hook_write(self, rel):
+        return self.p.decision({"tool_name": "Write", "session_id": "s1", "tool_input": {"file_path": str(self.p.root / rel)}})
+
+    def spawn(self, role):
+        return self.p.decision({"tool_name": "Agent", "session_id": "s1", "tool_input": {"subagent_type": role, "prompt": "x"}})
+
+    def work(self, *args, env=AGENT_ENV):
+        return subprocess.run([sys.executable, ".harness/core/scripts/work.py", *args], cwd=self.p.root, capture_output=True, text=True, env=env)
+
+    def state(self):
+        return json.loads((self.p.root / ".harness/_workspace/feat-chat/run.json").read_text())
+
+    def run_cmd(self, *args):
+        return subprocess.run([sys.executable, ".harness/core/scripts/harness.py", *args], cwd=self.p.root, capture_output=True, text=True, env=AGENT_ENV)
+
+    def write_feature(self):
+        self.p.write(CHAT, "void send() {}\n")
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} send\nimport 'package:my_app/features/chat/domain/chat.dart';\n")
+
+    def test_auto_start_and_self_ignore(self):
+        self.assertEqual(self.hook_write(CHAT), "allow")
+        st = self.state()
+        self.assertEqual(st["branch"], "feat/chat")
+        self.assertEqual(st["sessions"], ["s1"])
+        status = self.p.run("git", "status", "--porcelain").stdout
+        self.assertNotIn("_workspace", status, "작업 공간은 프로젝트 .gitignore 없이도 git 에 안 보여야 한다")
+
+    def test_review_rounds_capped(self):
+        for n in (1, 2, 3):
+            self.assertEqual(self.spawn("reviewer"), "allow")
+            self.assertEqual(self.state()["rounds"][-1]["n"], n)
+        self.assertEqual(self.spawn("reviewer"), "deny", "4번째 리뷰는 거부")
+        self.assertIn("review_r3.md", self.work("current").stdout)
+
+    def test_small_work_needs_verify_only(self):
+        self.hook_write(CHAT)
+        self.write_feature()
+        r = self.work("gate")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("harness verify", r.stdout)
+        self.run_cmd("verify")
+        self.assertEqual(self.work("gate").returncode, 0, self.work("gate").stdout)
+
+    def test_large_work_gate(self):
+        self.spawn("planner")  # planner 를 쓰면 L
+        self.write_feature()
+        self.run_cmd("verify")
+        out = self.work("gate").stdout
+        self.assertIn("reviewer 검토가 없다", out)
+
+        self.spawn("reviewer")
+        report = self.p.root / self.state()["rounds"][-1]["path"]
+        report.write_text(PASS_REPORT.replace("MAJOR 0", "MAJOR 2"))
+        self.assertIn("PASS 조건이 아니다", self.work("gate").stdout)
+
+        report.write_text(PASS_REPORT)
+        self.assertIn("통과한 테스트 실행 기록이 없다", self.work("gate").stdout)
+        self.run_cmd("test", CHAT_TEST)
+        self.assertEqual(self.work("gate").returncode, 0, self.work("gate").stdout)
+
+        # 리뷰 뒤 소스가 바뀌면 PASS 무효
+        self.p.write(CHAT, "void send() {}\n// 바뀜\n")
+        self.run_cmd("verify")
+        self.run_cmd("test", CHAT_TEST)
+        self.assertIn("리뷰(r1) 시작 뒤 소스가 바뀌었다", self.work("gate").stdout)
+
+    def test_reviewer_new_test_does_not_invalidate_review(self):
+        self.spawn("planner")
+        self.write_feature()
+        self.spawn("reviewer")
+        self.p.write("test/features/chat/domain/chat_edge_test.dart", f"// EXPECT {CHAT} send\nimport 'package:my_app/features/chat/domain/chat.dart';\n")
+        (self.p.root / self.state()["rounds"][-1]["path"]).write_text(PASS_REPORT)
+        self.run_cmd("verify")
+        self.run_cmd("test", "test/features/chat/domain/")
+        self.assertEqual(self.work("gate").returncode, 0, self.work("gate").stdout)
+
+    def test_risk_area_forces_large(self):
+        self.hook_write(PAY)
+        self.work("lane", "S")
+        self.p.write(PAY, "int pay() => 1;\n")
+        self.run_cmd("verify")
+        out = self.work("gate").stdout
+        self.assertIn("규모 L (위험 영역 변경: lib/features/pay/domain/pay.dart)", out)
+
+    def test_commit_keeps_evidence_valid_and_push_finalizes(self):
+        self.hook_write(CHAT)
+        self.write_feature()
+        self.run_cmd("verify")
+        self.assertEqual(self.p.commit("feat: 채팅", verify=False).returncode, 0)
+        r = self.work("pre-push", "origin", "x")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertFalse((self.p.root / ".harness/_workspace/feat-chat").exists(), "통과하면 작업 공간을 정리한다")
+
+    def test_human_push_is_not_gated(self):
+        self.hook_write(CHAT)
+        self.write_feature()
+        self.assertEqual(self.work("pre-push", env=ENV).returncode, 0)
+        self.assertTrue((self.p.root / ".harness/_workspace/feat-chat").exists(), "사람 push 는 정리도 하지 않는다")
+
+    def test_git_pre_push_hook_blocks_agent(self):
+        self.hook_write(CHAT)
+        self.write_feature()
+        self.p.commit("feat: 채팅", verify=False)
+        bare = Path(self.p.tmp.name) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        self.p.run("git", "remote", "add", "origin", str(bare))
+        r = subprocess.run(["git", "push", "-q", "origin", "feat/chat"], cwd=self.p.root, capture_output=True, text=True, env=AGENT_ENV)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("작업 완료 조건 미충족", r.stdout + r.stderr)
+
+    def test_stale_cleanup_is_safe(self):
+        ws = self.p.root / ".harness/_workspace"
+        old = time.time() - 40 * 86400
+
+        def make(name, br, mtime_old=True):
+            d = ws / name
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "run.json").write_text(json.dumps({"slug": name, "branch": br, "updated_ts": old, "rounds": []}))
+            if mtime_old:
+                for f in d.iterdir():
+                    os.utime(f, (old, old))
+            return d
+
+        gone = make("feat-gone", "feat/gone")                # 브랜치 없음 + 30일 → 삭제
+        self.p.run("git", "branch", "feat/open")
+        self.p.write("x.txt", "x")
+        self.p.run("git", "add", "x.txt")
+        self.p.run("git", "commit", "-q", "--no-verify", "-m", "chore: x")
+        self.p.run("git", "branch", "-f", "feat/open")       # main 에 없는 커밋 → 진행 중
+        opened = make("feat-open", "feat/open")
+        recent = make("feat-recent", "feat/gone2", mtime_old=False)  # 다른 세션이 최근에 씀
+        self.hook_write(CHAT)                                 # 새 작업 시작 → 정리 실행
+        self.assertFalse(gone.exists())
+        self.assertTrue(opened.exists(), "머지 안 된 브랜치의 작업은 지우지 않는다")
+        self.assertTrue(recent.exists(), "최근에 쓴 파일이 있으면 지우지 않는다")
+        self.assertTrue((ws / "feat-chat").exists())
+
+    def test_settings_sync_keeps_project_hooks(self):
+        path = self.p.root / ".claude/settings.json"
+        data = json.loads(path.read_text())
+        data["hooks"]["PreToolUse"][0]["matcher"] = "Bash"          # 옛 하네스 훅
+        data["hooks"].pop("SubagentStop")
+        data["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]})
+        data["permissions"] = {"allow": ["Bash(ls)"]}
+        path.write_text(json.dumps(data))
+        self.assertIn("settings.json 의 하네스 훅", self.p.harness("check-rules", check=False).stdout)
+        self.p.harness("sync")
+        new = json.loads(path.read_text())
+        self.assertIn("SubagentStop", new["hooks"])
+        self.assertEqual(new["permissions"], {"allow": ["Bash(ls)"]})
+        self.assertTrue(any(h["hooks"][0]["command"] == "echo mine" for h in new["hooks"]["PreToolUse"]))
+        self.assertEqual(self.p.harness("check-rules", check=False).returncode, 0)
+
+
+
+class GuardTest(unittest.TestCase):
+    """Mutation Guard — 사후 검출(보장) · 사전 차단(최선 노력)"""
+
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.write("pubspec.yaml", "name: my_app\n")
+        self.p.write(CHAT, "void send() {}\n")
+        self.p.write(CHAT_TEST, "// EXPECT x y\n")
+        self.assertEqual(self.p.commit("chore: 설치", verify=False).returncode, 0)
+        self.p.run("git", "switch", "-q", "-c", "feat/x")
+        self.p.write("lib/dirty.dart", "int dirty = 1;\n")   # 호출 전부터 있던 사용자 변경 (baseline)
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def hook(self, name, **payload):
+        return self.p.hook(name, payload)
+
+    def start(self, role, aid="agent1"):
+        self.hook("subagent", hook_event_name="SubagentStart", agent_id=aid, agent_type=role, session_id="s1")
+
+    def stop(self, aid="agent1"):
+        self.hook("subagent", hook_event_name="SubagentStop", agent_id=aid, agent_type="x", session_id="s1")
+
+    def returned(self):
+        r = self.hook("post_edit", tool_name="Agent", tool_input={"subagent_type": "reviewer"})
+        return json.loads(r.stdout)["reason"] if r.stdout.strip() else None
+
+    def sub_tool(self, role, tool, **inp):
+        out = self.hook("pre_tool", tool_name=tool, agent_id="agent1", agent_type=role, tool_input=inp).stdout.strip()
+        return json.loads(out)["hookSpecificOutput"] if out else {"permissionDecision": "allow"}
+
+    def test_planner_violation_detected_and_not_reverted(self):
+        self.start("planner")
+        self.p.write("lib/features/chat/domain/chat.dart", "void send() { /* planner */ }\n")   # 셸로 썼다고 가정
+        self.stop()
+        msg = self.returned()
+        self.assertIn("사후 검출", msg)
+        self.assertIn("lib/features/chat/domain/chat.dart", msg)
+        self.assertNotIn("lib/dirty.dart", msg, "baseline 변경은 허용")
+        self.assertIn("planner", (self.p.root / CHAT).read_text(), "되돌리지 않는다")
+        self.assertIsNone(self.returned(), "한 번만 알린다")
+        st = json.loads((self.p.root / ".harness/_workspace/feat-x/run.json").read_text())
+        self.assertIn("planner_invalid", st)
+
+    def test_planner_clean_run(self):
+        self.start("planner")
+        (self.p.root / ".harness/_workspace/feat-x/plan.md").write_text("# plan\n")
+        self.stop()
+        self.assertIsNone(self.returned())
+
+    def test_reviewer_may_add_tests_but_not_touch_existing(self):
+        self.start("reviewer")
+        self.p.write("test/features/chat/domain/chat_edge_test.dart", "// new\n")
+        self.stop()
+        self.assertIsNone(self.returned(), "새 테스트 파일은 허용")
+
+        self.start("reviewer", "agent2")
+        self.p.write(CHAT_TEST, "// 약화\n")
+        self.stop("agent2")
+        self.assertIn("기존 테스트를 고치거나 지웠다", self.returned())
+
+        self.start("reviewer", "agent3")
+        (self.p.root / CHAT_TEST).unlink()
+        self.stop("agent3")
+        self.assertIn("기존 테스트를 고치거나 지웠다", self.returned())
+
+    def test_commit_and_stage_detected(self):
+        self.start("reviewer")
+        self.p.run("git", "add", "lib/dirty.dart")
+        self.stop()
+        self.assertIn("stage(index)", self.returned())
+        self.start("reviewer", "agent2")
+        self.p.run("git", "commit", "-q", "--no-verify", "-m", "chore: x")
+        self.stop("agent2")
+        self.assertIn("HEAD 변경", self.returned())
+
+    def test_main_agent_edits_during_background_review_are_excluded(self):
+        self.start("reviewer")
+        self.hook("pre_tool", tool_name="Edit", session_id="s1", tool_input={"file_path": str(self.p.root / CHAT)})  # 메인
+        self.p.write(CHAT, "void send() { /* main */ }\n")
+        self.stop()
+        self.assertIsNone(self.returned())
+
+    def test_realtime_block_is_labelled_best_effort(self):
+        d = self.sub_tool("planner", "Write", file_path=str(self.p.root / CHAT))
+        self.assertEqual(d["permissionDecision"], "deny")
+        self.assertIn("사전 차단", d["permissionDecisionReason"])
+        self.assertEqual(self.sub_tool("planner", "Write", file_path=str(self.p.root / ".harness/_workspace/feat-x/plan.md"))["permissionDecision"], "allow")
+        self.assertEqual(self.sub_tool("reviewer", "Edit", file_path=str(self.p.root / CHAT_TEST))["permissionDecision"], "deny")
+        self.assertEqual(self.sub_tool("reviewer", "Write", file_path=str(self.p.root / "test/new_test.dart"))["permissionDecision"], "allow")
+        self.assertEqual(self.sub_tool("reviewer", "Bash", command="flutter test && git commit -am x")["permissionDecision"], "deny")
+        self.assertEqual(self.sub_tool("reviewer", "Bash", command="git diff main && git status")["permissionDecision"], "allow")
+
+    def test_violation_invalidates_review_round_in_gate(self):
+        self.p.decision({"tool_name": "Agent", "session_id": "s1", "tool_input": {"subagent_type": "reviewer"}})
+        self.start("reviewer")
+        self.p.write(CHAT, "void send() { /* reviewer */ }\n")
+        self.stop()
+        out = subprocess.run([sys.executable, ".harness/core/scripts/work.py", "gate"], cwd=self.p.root, capture_output=True, text=True, env=ENV).stdout
+        self.assertIn("Mutation Guard 위반으로 무효", out)
+
+    def test_stop_hook_reports_background_violation(self):
+        self.start("reviewer")
+        self.p.write(CHAT, "void send() { /* bg */ }\n")
+        self.stop()
+        out = json.loads(self.hook("stop").stdout)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("역할 위반", out["reason"])
+
+    def test_disabled(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["guard"] = {"enabled": False}
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.start("planner")
+        self.p.write(CHAT, "void send() { /* off */ }\n")
+        self.stop()
+        self.assertIsNone(self.returned())
+        self.assertEqual(self.sub_tool("planner", "Write", file_path=str(self.p.root / CHAT))["permissionDecision"], "allow")
+
+
+
+def _iso(ts):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class UsageTest(unittest.TestCase):
+    """토큰 실측 — 세션 기록 파싱 · 중복 제거 · 구간 · 역할 · Codex 증분 · 원문 미저장 · 도입 전후 버전"""
+
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.commit("chore: 설치", verify=False)
+        self.home = Path(self.p.tmp.name) / "home"
+        self.env = {**ENV, "HARNESS_CLAUDE_HOME": str(self.home / ".claude"), "HARNESS_CODEX_HOME": str(self.home / ".codex")}
+        self.pdir = self.home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.p.root.resolve()))
+        self.pdir.mkdir(parents=True)
+        self.t0 = time.time() - 3600
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def msg(self, mid, ts, branch="feat/chat", out=10, inp=100, read=1000):
+        return json.dumps({"type": "assistant", "timestamp": _iso(ts), "gitBranch": branch, "message": {
+            "id": mid, "content": [{"type": "text", "text": "SECRET 대화 원문"}],
+            "usage": {"input_tokens": inp, "cache_creation_input_tokens": 50, "cache_read_input_tokens": read, "output_tokens": out}}})
+
+    def write_claude(self):
+        lines = [self.msg("m1", self.t0 + 10, out=5), self.msg("m1", self.t0 + 11, out=20),   # 같은 응답 두 줄 → 한 번
+                 self.msg("m2", self.t0 + 20), self.msg("m0", self.t0 - 100)]                 # m0 은 구간 밖
+        (self.pdir / "s1.jsonl").write_text("\n".join(lines) + "\n")
+        sub = self.pdir / "s1/subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-a1.jsonl").write_text(self.msg("r1", self.t0 + 15, out=7) + "\n")
+        (sub / "agent-a1.meta.json").write_text(json.dumps({"agentType": "reviewer"}))
+
+    def usage_mod(self):
+        code = (f"import sys,json; sys.path.insert(0, '.harness/core/scripts'); import usage; "
+                f"st={{'slug':'feat-chat','branch':'feat/chat','started_ts':{self.t0},'sessions':['s1'],'rounds':[1],'harness_version':'0.4.0'}}; "
+                f"print(json.dumps(usage.record_work(st, lane='L', end={self.t0 + 100})))")
+        r = subprocess.run([sys.executable, "-c", code], cwd=self.p.root, capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_claude_window_roles_and_dedupe(self):
+        self.write_claude()
+        rec = self.usage_mod()
+        main, rev = rec["roles"]["main"], rec["roles"]["reviewer"]
+        self.assertEqual(main["messages"], 2, "m1 중복 제거 + m0 구간 밖")
+        self.assertEqual(main["output"], 30, "m1 은 가장 큰 output(20) 하나 + m2(10)")
+        self.assertEqual((rev["calls"], rev["output"]), (1, 7))
+        self.assertEqual((rec["lane"], rec["harness_version"], rec["agent"]), ("L", "0.4.0", "claude"))
+        raw = (self.p.root / ".harness/out/usage.jsonl").read_text()
+        self.assertNotIn("SECRET", raw, "원문을 남기지 않는다")
+
+    def test_codex_cumulative_delta(self):
+        d = self.home / ".codex/sessions/2026/11/20"
+        d.mkdir(parents=True)
+        tc = lambda ts, i, c, o: json.dumps({"timestamp": _iso(ts), "type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": i, "cached_input_tokens": c, "output_tokens": o}}}})
+        (d / "rollout-x.jsonl").write_text("\n".join([
+            json.dumps({"type": "session_meta", "payload": {"id": "c1", "cwd": str(self.p.root), "git": {"branch": "feat/chat"}}}),
+            tc(self.t0 - 50, 1000, 500, 10), tc(self.t0 + 30, 3000, 1500, 40), tc(self.t0 + 60, 5000, 2000, 90)]) + "\n")
+        rec = self.usage_mod()
+        cx = rec["roles"]["codex-main"]
+        self.assertEqual((cx["output"], cx["cache_read"], cx["input"]), (80, 1500, 2500), "구간 끝 누적 − 구간 시작 전 누적")
+        self.assertEqual(rec["agent"], "codex")
+
+    def test_report_and_compare(self):
+        self.write_claude()
+        self.usage_mod()
+        out = subprocess.run([sys.executable, ".harness/core/scripts/usage.py"], cwd=self.p.root, capture_output=True, text=True, env=self.env).stdout
+        self.assertIn("| 0.4.0 | L | 1 |", out)
+        self.assertIn("브랜치 실측", out)
+        cmp_ = subprocess.run([sys.executable, ".harness/core/scripts/usage.py", "--compare", "0.3.0", "0.4.0"], cwd=self.p.root, capture_output=True, text=True, env=self.env).stdout
+        self.assertIn("표본 부족", cmp_)
+
+    def test_version_before_adoption(self):
+        code = ("import sys; sys.path.insert(0, '.harness/core/scripts'); import usage, time; "
+                "print(usage.harness_version_at(time.time()), '|', usage.harness_version_at(0))")
+        out = subprocess.run([sys.executable, "-c", code], cwd=self.p.root, capture_output=True, text=True, env=self.env).stdout
+        now, before = [x.strip() for x in out.split("|")]
+        self.assertNotEqual(now, "도입 전")
+        self.assertEqual(before, "도입 전", "하네스가 들어오기 전 시각은 '도입 전'")
+
+    def test_finalize_records_usage(self):
+        self.write_claude()
+        self.p.run("git", "switch", "-q", "-c", "feat/chat")
+        self.p.write("lib/a.dart", "int a = 1;\n")
+        subprocess.run([sys.executable, ".harness/core/scripts/work.py", "lane", "S"], cwd=self.p.root, env=self.env, capture_output=True)
+        subprocess.run([sys.executable, ".harness/core/scripts/harness.py", "verify"], cwd=self.p.root, env=self.env, capture_output=True)
+        r = subprocess.run([sys.executable, ".harness/core/scripts/work.py", "end"], cwd=self.p.root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = (self.p.root / ".harness/out/usage.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(rows[-1])["kind"], "work")
+
+
+
+class DuplicateRuleTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        self.p.write("lib/a.dart", "int a = 1;\n")
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def test_same_rule_in_two_documents(self):
+        rule = "- 날짜는 항상 UTC 로 저장하고 화면에서만 지역 시간으로 바꾼다.\n"
+        self.p.write(".harness/rules/data.md", '---\ndescription: 데이터\npaths:\n  - "lib/**"\n---\n# 데이터\n' + rule)
+        self.p.harness("sync")
+        self.assertEqual(self.p.harness("check-rules", check=False).returncode, 0)
+        with open(self.p.root / "CLAUDE.md", "a") as f:
+            f.write(rule)  # 어댑터에 복사
+        out = self.p.harness("check-rules", check=False).stdout
+        self.assertIn("같은 규칙이 여러 문서에 있다", out)
+        self.assertIn("project/data.md", out)
+        self.assertIn("CLAUDE.md", out)
+
+    def test_fresh_project_has_no_false_positive(self):
+        self.assertEqual(self.p.harness("check-rules", check=False).returncode, 0)
+
+
+FAKE_GH = """#!/usr/bin/env python3
+import json, sys, pathlib
+cfg = json.loads(pathlib.Path("fakegh.json").read_text())
+a = sys.argv[1:]
+if a[:2] == ["pr", "list"]:
+    print(json.dumps(cfg.get("prs", [])))
+elif a[:2] == ["repo", "view"]:
+    print(json.dumps({"nameWithOwner": "o/r"}))
+elif a[:1] == ["api"]:
+    print(json.dumps(cfg.get("runs", [])))
+"""
+
+
+class PromotionTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.harness("init", "flutter")
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["promotion"] = [["dev", "main"]]
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.p.write(".gitignore", (self.p.root / ".gitignore").read_text() + "fakegh.json\n")
+        self.p.commit("chore: 설치", verify=False)
+        bare = Path(self.p.tmp.name) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        self.p.run("git", "remote", "add", "origin", str(bare))
+        self.p.run("git", "push", "-q", "origin", "main", "main:dev")
+        gh = Path(self.p.tmp.name) / "gh"
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        self.env = {**ENV, "HARNESS_GH": str(gh)}
+        self.fake(runs=[{"name": "Harness", "status": "completed", "conclusion": "success"}])
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def fake(self, **kv):
+        (self.p.root / "fakegh.json").write_text(json.dumps(kv))
+
+    def check(self, head="dev", base="main"):
+        return subprocess.run([sys.executable, ".harness/core/scripts/harness.py", "pr", "check-promotion", head, base],
+                              cwd=self.p.root, capture_output=True, text=True, env=self.env)
+
+    def advance_dev(self):
+        self.p.run("git", "switch", "-q", "-c", "dev", "--track", "origin/dev")
+        self.p.write("lib/x.dart", "int x = 1;\n")
+        self.p.commit("feat: x", verify=False)
+        self.p.run("git", "push", "-q", "origin", "dev")
+
+    def test_empty_promotion(self):
+        self.assertIn("빈 승격", self.check().stdout)
+
+    def test_passes_and_rejects(self):
+        self.advance_dev()
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("커밋 1개", r.stdout)
+        self.fake(prs=[{"number": 7, "url": "https://x/pr/7"}], runs=[{"name": "Harness", "status": "completed", "conclusion": "success"}])
+        self.assertIn("이미 열린 승격 PR", self.check().stdout)
+        self.fake(runs=[{"name": "Flutter", "status": "completed", "conclusion": "failure"}, {"name": "Harness", "status": "in_progress", "conclusion": None}])
+        out = self.check().stdout
+        self.assertIn("검사 실패: Flutter", out)
+        self.assertIn("아직 끝나지 않았다: Harness", out)
+        self.assertIn("승격 경로가 아니다", self.check("main", "dev").stdout)
+
+    def test_no_promotion_config(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg.pop("promotion")
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        self.assertIn("승격 경로(promotion)가 없다", self.check().stdout)
+
+
+
+FAKE_GH_METRICS = """#!/usr/bin/env python3
+import json, sys, pathlib
+cfg = json.loads(pathlib.Path("fakegh.json").read_text())
+a = sys.argv[1:]
+if a[:2] == ["repo", "view"]:
+    print(json.dumps({"nameWithOwner": "o/r"}))
+elif a[:2] == ["api", "graphql"]:
+    print(json.dumps({"data": {"repository": {"pullRequests": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": cfg["prs"]}}}}))
+elif a[0] == "api" and "/jobs" in a[1]:
+    print(json.dumps({"jobs": [{"name": "Lint", "conclusion": "failure"}, {"name": "Test", "conclusion": "success"}]}))
+elif a[0] == "api" and "actions/runs" in a[1]:
+    print(json.dumps({"workflow_runs": cfg["runs"]}))
+"""
+
+
+class MetricsGithubTest(unittest.TestCase):
+    def setUp(self):
+        self.p = Project()
+        self.p.write("README.md", "# app\n")
+        self.p.run("git", "add", "README.md")  # .harness/core 없이
+        self.p.run("git", "commit", "-q", "--no-verify", "-m", "chore: 하네스 전")
+        self.before = _git(self.p.root, "rev-parse", "HEAD")
+        self.p.harness("init", "flutter")
+        self.p.write(".gitignore", (self.p.root / ".gitignore").read_text() + "fakegh.json\n")
+        self.p.commit("chore: 하네스 설치", verify=False)
+        self.after = _git(self.p.root, "rev-parse", "HEAD")
+        gh = Path(self.p.tmp.name) / "gh"
+        gh.write_text(FAKE_GH_METRICS)
+        gh.chmod(0o755)
+        self.env = {**ENV, "HARNESS_GH": str(gh)}
+        pr = lambda n, title, head, oid: {"number": n, "title": title, "headRefName": head, "baseRefName": "main",
+                                         "mergedAt": "2026-11-10T00:00:00Z", "mergeCommit": {"oid": oid}, "commits": {"totalCount": 2}}
+        run = lambda i, name, br, concl, sha, t: {"id": i, "name": name, "event": "pull_request", "head_branch": br, "conclusion": concl,
+                                                 "head_sha": sha, "created_at": f"2026-11-10T00:0{t}:00Z"}
+        (self.p.root / "fakegh.json").write_text(json.dumps({
+            "prs": [pr(1, "feat: a", "feat/a", self.before), pr(2, "fix: b", "fix/b", self.after), pr(3, "c", "feat/c", self.after),
+                    pr(4, "staging", "main", self.after)],
+            "runs": [run(10, "CI", "feat/a", "failure", self.before, 1), run(11, "CI", "feat/a", "success", self.before, 2),
+                     run(12, "CI", "fix/b", "success", self.after, 3), run(13, "CI", "feat/c", "cancelled", self.after, 4)]}))
+
+    def tearDown(self):
+        self.p.tmp.cleanup()
+
+    def test_metrics_by_version(self):
+        r = subprocess.run([sys.executable, ".harness/core/scripts/harness.py", "metrics", "github"], cwd=self.p.root,
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout
+        self.assertIn("| 전체 | 3 |", out, "승격 PR(head=main) 제외")
+        self.assertIn("| 도입 전 | 1 |", out)
+        self.assertIn("버그 수정 비율", out)
+        self.assertIn("CI / Lint 1", out)
+        res = json.loads(sorted((self.p.root / ".harness/out/metrics").glob("github-*.json"))[-1].read_text())
+        allpr = res["all"]["pr"]
+        self.assertEqual(allpr["by_type"], {"feat": 2, "fix": 1}, "제목 접두사 → 없으면 브랜치 접두사")
+        self.assertEqual(allpr["fix_ratio_pct"], 33.3)
+        self.assertEqual(res["all"]["ci"]["first_pass_pct"], 50.0, "feat/a 첫 실행 실패 · fix/b 성공 · 취소 제외")
+        self.assertEqual(res["by_version"]["도입 전"]["pr"]["prs"], 1)
+        self.assertNotIn("fakegh", self.p.run("git", "status", "--porcelain").stdout)
 
 
 if __name__ == "__main__":

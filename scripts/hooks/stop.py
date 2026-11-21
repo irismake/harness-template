@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib import CONFIG_PATH, CORE, ROOT  # noqa: E402
+from lib import CONFIG_PATH, CORE, ROOT, load_config  # noqa: E402
 
 
 def run(*args):
@@ -25,11 +25,24 @@ def main():
     data = json.load(sys.stdin)
     if data.get("stop_hook_active") or not CONFIG_PATH.exists():
         return
+    try:  # 백그라운드 서브에이전트의 위반은 여기서 알린다
+        import guard
+        msg = guard.take_unreported()
+    except Exception:  # noqa: BLE001
+        msg = None
+    if msg:
+        print(json.dumps({"decision": "block", "reason": msg}, ensure_ascii=False))
+        return
     results = [
         run(str(CORE / "scripts/check_rules.py")),
         run(str(CORE / "scripts/check_code.py"), "--lint"),
     ]
     failed = [r for r in results if r.returncode != 0]
+    try:  # 종료 전 검사 = harness verify 와 같다 → 완료 게이트의 증거로 남긴다
+        import work
+        work.record_verify(load_config(), not failed)
+    except Exception:  # noqa: BLE001 — 기록 실패가 응답을 막으면 안 된다
+        pass
     if not failed:
         return
     report = "\n".join((r.stdout + r.stderr).strip() for r in failed)

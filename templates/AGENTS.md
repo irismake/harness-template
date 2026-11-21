@@ -8,15 +8,7 @@ Codex 는 이 파일만 자동으로 읽으므로 아래 순서를 따른다.
 3. 작업이 스킬 표에 해당하면 그 `SKILL.md` 를 읽고 절차대로 진행한다.
 4. **설계가 끝나지 않았으면**(`.harness/config.json` 의 `design_done: false`) 기능을 만들기 전에 `project-design` 스킬부터 한다.
 
-## Codex 에서 지킬 것 (Claude 는 훅이 대신 막는다)
-
-- 작업을 마치기 전에 `.harness/core/harness verify` 를 실행하고 통과시킨다. 빌드 · 전체 테스트는 로컬에서 돌리지 않는다 (CI).
-- 커밋은 git 훅이 다시 검사한다. `--no-verify` 로 우회하지 않는다.
-- `core.md` 의 "사용자 승인 없이 하지 않는다" 와 보호 파일을 스스로 지킨다. `.harness/core/` 는 고치지 않는다.
-- 질문이 필요한 스킬(예: `project-design`)은 선택지를 번호 목록으로 보여 주고 답을 기다린다.
-- 역할: L 경로 계획은 `planner` 출력 형식대로 써서 승인받은 뒤 구현한다. 독립 리뷰는 구현한 세션이 아니라 **새 세션**에서 `reviewer` 지침으로 요구사항과 기준 ref 만 받아 한다.
-
-## 하네스 표 (자동 생성)
+## 하네스 (자동 생성 — 하네스 버전에 맞춰 `harness sync` 가 다시 쓴다)
 
 <!-- harness:start -->
 <!-- harness:end -->

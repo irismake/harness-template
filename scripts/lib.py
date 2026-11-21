@@ -33,6 +33,14 @@ ROOT = _project_root()
 HARNESS = ROOT / ".harness"
 CONFIG_PATH = HARNESS / "config.json"
 OUT = HARNESS / "out"
+WORKSPACE = HARNESS / "_workspace"   # 역할 산출물 · 작업 상태 (gitignore, 작업이 끝나면 자동 정리)
+# 하네스가 쓰는 로컬 파일 — 상태 비교 · 해시에서 뺀다
+LOCAL_DIRS = (".harness/out/", ".harness/_workspace/")
+
+
+def is_local(path):
+    """하네스 로컬 파일 · 파이썬 캐시 — 상태 비교 · 해시 · 변경 목록에서 뺀다"""
+    return path.startswith(LOCAL_DIRS) or path.startswith(".harness/core") or "__pycache__/" in path or path.endswith(".pyc")
 
 # 모든 팩 · 프로젝트에 공통인 기본값. 팩(pack.json) → 프로젝트(config.json) 순서로 덮어쓴다.
 # 리스트는 이어 붙이고(중복 제거), 값은 덮어쓴다.
@@ -51,6 +59,8 @@ DEFAULTS = {
     "layers": [],
     # TDD Guard (scripts/tdd.py) — 기본 꺼짐. project-design 이 테스트 정책에 따라 켜고 대상 경로를 채운다
     "tdd": {"enabled": False, "paths": [], "exclude": []},
+    # Mutation Guard (scripts/guard.py) — planner · reviewer 서브에이전트의 허용 범위 밖 변경 검출 · 차단. 기본 켬
+    "guard": {"enabled": True},
     # 요구사항 추적 (scripts/traceability.py) — 기본 꺼짐. REQ → 시나리오 → 테스트 연결을 문서 · 코드에서 검사
     "trace": {"enabled": False},
     "secret_files": [
@@ -134,7 +144,12 @@ def _load_module(path, name):
         return None
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    import sys
+    prev, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # 프로젝트 폴더에 __pycache__ 를 만들지 않는다
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = prev
     return module
 
 
@@ -185,3 +200,81 @@ def front_matter(text):
     if pm:
         paths = re.findall(r'^\s*-\s*"?([^"\n]+?)"?\s*$', pm.group(1), re.M)
     return fields, paths
+
+
+def has_head(cwd=None):
+    return subprocess.run(["git", "-C", str(cwd or ROOT), "rev-parse", "-q", "--verify", "HEAD"], capture_output=True).returncode == 0
+
+
+def base_ref(cfg):
+    branch = cfg.get("base_branch", "main")
+    for ref in (f"origin/{branch}", branch):
+        if subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "-q", ref], capture_output=True).returncode == 0:
+            return ref
+    return "HEAD" if has_head() else None
+
+
+def changed_files(cfg):
+    """기준 브랜치 이후 바뀐 파일 (커밋 · 커밋 안 됨 · 새 파일, 삭제 포함, 하네스 로컬 파일 제외)"""
+    base = base_ref(cfg)
+    files = set()
+    if base:
+        mb = git("merge-base", base, "HEAD", check=False).strip() or base
+        files |= set(git("diff", "--name-only", mb, check=False).split("\n"))
+    else:
+        files |= set(git("ls-files", "--cached", check=False).split("\n"))
+    files |= set(git("ls-files", "--others", "--exclude-standard", check=False).split("\n"))
+    return sorted(f for f in files if f and not is_local(f))
+
+
+def file_states(cwd=None):
+    """{경로: 내용 해시 | "deleted"} — HEAD 와 다른 추적 파일 + 추적 안 된 파일(무시 제외). 하네스 로컬 파일 · 서브모듈 제외."""
+    import hashlib
+    root = Path(cwd or ROOT)
+    paths = set()
+    if has_head(root):
+        paths |= set(git("diff", "--name-only", "HEAD", cwd=root, check=False).split("\n"))
+    else:
+        paths |= set(git("ls-files", "--cached", cwd=root, check=False).split("\n"))
+    paths |= set(git("ls-files", "--others", "--exclude-standard", cwd=root, check=False).split("\n"))
+    out = {}
+    for p in sorted(x for x in paths if x and not is_local(x)):
+        f = root / p
+        if f.is_symlink():
+            out[p] = "link:" + os.readlink(f)
+        elif f.is_file():
+            out[p] = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
+        elif not f.exists():
+            out[p] = "deleted"
+    return out
+
+
+def tree_entries(cwd=None):
+    """작업 트리 전체 내용 = {경로: blob 해시} (커밋 여부와 무관, gitignore 존중, 하네스 로컬 파일 제외)"""
+    import tempfile
+    root = Path(cwd or ROOT)
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
+        run = lambda *a: subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True, env=env)
+        if has_head(root):
+            run("read-tree", "HEAD")
+        run("add", "-A")
+        tree = run("write-tree").stdout.strip()
+        listing = run("ls-tree", "-r", tree).stdout if tree else ""
+    out = {}
+    for line in listing.splitlines():
+        meta, path = line.split("\t", 1)
+        cache = "__pycache__/" in path or path.endswith(".pyc")
+        if not cache and (not is_local(path) or path.startswith(".harness/core")):  # 하네스 포인터는 상태에 포함
+            out[path] = meta.split()[2]
+    return out
+
+
+def fingerprint(entries, include=None):
+    """tree_entries 를 한 해시로. include(path) 가 참인 경로만."""
+    import hashlib
+    h = hashlib.sha256()
+    for p, v in sorted(entries.items()):
+        if include is None or include(p):
+            h.update(f"{p}\0{v}\n".encode())
+    return h.hexdigest()[:16]
