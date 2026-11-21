@@ -13,6 +13,8 @@
 완료 게이트 (git pre-push · harness work end)
             모든 규모: 지금 트리로 harness verify 통과 기록
             L 규모 (또는 리뷰를 한 작업): 최신 리뷰 PASS (보고서 형식) · Mutation Guard 위반 없음 + 리뷰 시작 때 소스 해시 = 지금 소스 해시
+                       (리뷰 소스 해시는 하네스(.harness/core)를 뺀다 — 하네스 업데이트만으로 리뷰가 무효가 되지 않는다.
+                        verify · 테스트 기록은 하네스까지 포함한 트리 해시라 새 검사 기준으로 다시 통과해야 한다)
                        + 지금 트리로 관련 테스트(바뀐 테스트 · 바뀐 코드와 연결된 테스트) 통과 기록
             규모 하한: planner 를 썼거나 risk_areas 를 건드렸거나 layers 두 곳 이상 → L (선언이 작아도)
 자동 종료   게이트 통과 시 사용량 집계 후 작업 공간 삭제. 실패 · 중단이면 남아서 이어서 한다
@@ -140,9 +142,18 @@ def _is_test(cfg, rel):
     return tdd.is_test(cfg, rel)
 
 
+def _is_harness(rel):
+    return rel == ".harness/core" or rel.startswith(".harness/core/")
+
+
 def fingerprints(cfg):
     entries = tree_entries()
     return fingerprint(entries), fingerprint(entries, lambda p: not _is_test(cfg, p))
+
+
+def review_fingerprint(cfg):
+    """리뷰 대상 소스 해시 — 테스트 · 하네스(.harness/core) 제외. 하네스 업데이트는 검사 기준 변경이라 리뷰가 아니라 verify · 테스트로 다시 확인한다."""
+    return fingerprint(tree_entries(), lambda p: not _is_test(cfg, p) and not _is_harness(p))
 
 
 def load_evidence():
@@ -190,7 +201,8 @@ def start_role(cfg, role, session=None):
         _, fp_src = fingerprints(cfg)
         n = len(state["rounds"]) + 1
         path = str((ws() / f"review_r{n}.md").relative_to(ROOT))
-        state["rounds"].append({"n": n, "path": path, "started_ts": time.time(), "fp_src": fp_src})
+        state["rounds"].append({"n": n, "path": path, "started_ts": time.time(), "fp_src": fp_src,
+                                "fp_review": review_fingerprint(cfg)})
         save(state)
         return True, f"review round {n}/{MAX_ROUNDS}: {path}"
     return True, ""
@@ -255,7 +267,9 @@ def gate(cfg):
                     problems.append(f"최신 리뷰(r{last['n']}) 판정이 {rep['verdict']} 다")
                 elif rep["blocker"] or rep["major"] or rep["unverified"]:
                     problems.append(f"r{last['n']} 가 PASS 인데 BLOCKER {rep['blocker']} · MAJOR {rep['major']} · 미검증(필수) {rep['unverified']} — PASS 조건이 아니다")
-            if last["fp_src"] != fp_src:
+            # 이전 하네스가 연 라운드(fp_review 없음)는 예전 기준(하네스 포함)으로 비교한다
+            if ("fp_review" in last and last["fp_review"] != review_fingerprint(cfg)) or \
+                    ("fp_review" not in last and last["fp_src"] != fp_src):
                 problems.append(f"리뷰(r{last['n']}) 시작 뒤 소스가 바뀌었다 — 바뀐 코드로 다시 리뷰한다")
             runs = [t for t in ev["tests"] if t["fp"] == fp_all]
             shell_ok = any(r.get("results") is None and r.get("exit") == 0 for r in runs)  # 구조화 실행기가 없는 팩
