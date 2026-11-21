@@ -283,12 +283,27 @@ def cycle(cfg, src, staged=False):
     return False, "RED 미확인 — 테스트를 먼저 쓰고 harness test 로 실패를 확인한다"
 
 
+def _uncommitted():
+    """HEAD 와 다른(아직 커밋하지 않은) 파일 — 커밋한 파일은 커밋 때 pre-commit 이 이미 완료 조건을 확인했다"""
+    paths = set(git("diff", "--name-only", "HEAD", check=False).split("\n")) if has_head() else None
+    if paths is None:
+        return None  # 첫 커밋 전: 전부 대상
+    return paths | set(git("ls-files", "--others", "--exclude-standard", check=False).split("\n"))
+
+
 def check(ctx, mode):
-    """check_code.py 에서 호출 — 변경된 대상 파일마다 완료 조건 확인 (CI 는 harness tdd ci 가 한다)"""
+    """check_code.py 에서 호출 — 변경된 대상 파일마다 완료 조건 확인 (CI 는 harness tdd ci 가 한다)
+
+    기능 브랜치의 이미 커밋한 대상 파일은 다시 판정하지 않는다 — 커밋 때 pre-commit 이 확인했고,
+    커밋하면 그 기록을 지우므로(재사용 방지) 다시 보면 언제나 "RED 미확인" 이 된다. 브랜치 전체는 PR 의 `tdd ci` 가 본다.
+    """
     cfg = ctx.cfg
     if not enabled(cfg) or mode == "file" or os.environ.get("GITHUB_ACTIONS") == "true":
         return
+    pending = None if mode == "staged" else _uncommitted()  # staged: stage 된 변경 = 이번 커밋 대상
     for path in sorted(set(ctx.added) | set(ctx.new)):
+        if pending is not None and path not in pending:
+            continue
         if is_guarded(cfg, path) and (ROOT / path).is_file():
             ok, msg = cycle(cfg, path, staged=(mode == "staged"))
             if not ok:
