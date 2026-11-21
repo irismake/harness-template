@@ -598,6 +598,60 @@ class TddGuardTest(unittest.TestCase):
         self.assertEqual(self.test(CHAT_TEST).returncode, 0)     # 테스트 v2 로는 실패한 적이 없다
         self.assertTrue(any("RED 이후 구현이 바뀌지 않았다" in l for l in self.tdd_problems()), self.tdd_problems())
 
+    def test_formatting_test_after_red_still_completes(self):
+        # 정상 흐름: RED 뒤 테스트에 포맷(공백 · 줄바꿈)만 적용하고 구현 → GREEN
+        self.write_chat_test("send")
+        self.test(CHAT_TEST)                                     # load_error
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)  # fail
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} send\n\n\nimport   'package:my_app/features/chat/domain/chat.dart';\n\n")
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+
+    def test_declaration_file_completes_when_linked_impl_changed_in_cycle(self):
+        # 정상 흐름: 동작 없는 선언 파일(모델 · 인터페이스)은 골격이 곧 완성본 — 같은 사이클에서 연결된 구현이 바뀌면 완료
+        model = "lib/features/chat/domain/chat_model.dart"
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} send\n"
+                                "import 'package:my_app/features/chat/domain/chat.dart';\n"
+                                "import 'package:my_app/features/chat/domain/chat_model.dart';\n")
+        self.test(CHAT_TEST)                                     # load_error
+        self.p.write(model, "class ChatModel {}\n")
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)  # fail (모델 완성 · 구현 골격)
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+
+    def test_declaration_file_with_only_test_fixed_is_still_blocked(self):
+        # 선언 파일이 있어도, 구현이 하나도 바뀌지 않고 테스트만 고쳐 통과하면 미완료
+        model = "lib/features/chat/domain/chat_model.dart"
+        self.p.write(model, "class ChatModel {}\n")
+        self.p.write(CHAT, "void send() {}\n")
+        imports = ("import 'package:my_app/features/chat/domain/chat.dart';\n"
+                   "import 'package:my_app/features/chat/domain/chat_model.dart';\n")
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} sned\n" + imports)
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} send\n" + imports)
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        problems = self.tdd_problems()
+        self.assertTrue(any(CHAT in l and "RED 이후 구현이 바뀌지 않았다" in l for l in problems), problems)
+        self.assertTrue(any(model in l and "RED 이후 구현이 바뀌지 않았다" in l for l in problems), problems)
+
+    def test_records_from_previous_version_still_complete(self):
+        # 업데이트 전 기록(테스트 모양 해시 없음)으로 끝낸 사이클도 그대로 완료로 인정한다
+        self.write_chat_test("send")
+        self.p.write(CHAT, "void stub() {}\n")
+        self.test(CHAT_TEST)
+        self.p.write(CHAT, "void send() {}\n")
+        self.test(CHAT_TEST)
+        state_file = self.p.root / ".harness/out/tdd.json"
+        state = json.loads(state_file.read_text())
+        for run in state["runs"]:
+            run.pop("shapes", None)
+        state_file.write_text(json.dumps(state))
+        self.assertEqual(self.tdd_problems(), [])
+
     # ── Bash 로 대상 코드를 쓰면 바로 알린다 (명령 전후 비교) ──
 
     def bash(self, command, tid="t1", pre=True):
