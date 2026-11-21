@@ -789,6 +789,34 @@ class TddGuardTest(unittest.TestCase):
         matchers = [m.get("matcher", "") for m in settings["hooks"]["PostToolUse"]]
         self.assertTrue(any("Bash" in m.split("|") for m in matchers), matchers)
 
+    # ── 기능 브랜치에서 여러 번 나눠 커밋 ──
+
+    def test_committed_cycle_on_feature_branch_stays_complete(self):
+        # 정상 흐름: 기능 브랜치에서 사이클 → 커밋(pre-commit 통과) → 다음 작업 중 verify — 이미 커밋한 파일을 다시 막지 않는다
+        self.p.run("git", "switch", "-q", "-c", "feat/chat")
+        self.write_chat_test("send")
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.p.commit("feat: 채팅 보내기").returncode, 0)
+        self.p.write("README.md", "# 다음 작업\n")
+        out = self.p.harness("check-code", "--base", "main", check=False).stdout
+        self.assertNotIn("[tdd]", out)
+
+    def test_uncommitted_change_after_commit_on_feature_branch_is_still_checked(self):
+        # 커밋 뒤 RED 없이 다시 고친 대상 파일은 계속 잡는다
+        self.p.run("git", "switch", "-q", "-c", "feat/chat")
+        self.write_chat_test("send")
+        self.p.write(CHAT, "void stub() {}\n")
+        self.test(CHAT_TEST)
+        self.p.write(CHAT, "void send() {}\n")
+        self.test(CHAT_TEST)
+        self.assertEqual(self.p.commit("feat: 채팅 보내기").returncode, 0)
+        self.p.write(CHAT, "void send() {}\nvoid receive() {}\n")  # 훅 밖(셸 등)에서 고쳤다고 가정
+        out = self.p.harness("check-code", "--base", "main", check=False).stdout
+        self.assertIn(f"[tdd] {CHAT}", out)
+
     def test_red_of_other_feature_does_not_unlock(self):
         self.write_chat_test()
         self.test(CHAT_TEST)
