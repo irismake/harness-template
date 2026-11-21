@@ -78,6 +78,7 @@ def main():
     rules = cfg.get("protected", {})
 
     if tool == "Bash":
+        tdd.bash_before(cfg, data.get("tool_use_id"))  # 실행 후 훅이 이 명령의 TDD 대상 변경을 찾는다
         command = tool_input.get("command", "")
         protected = set(cfg.get("protected_branches", []))
         if pushes_protected_branch(command, protected):
