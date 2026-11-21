@@ -17,6 +17,12 @@ from lib import CORE, ROOT, load_checks, load_config  # noqa: E402
 
 def main():
     data = json.load(sys.stdin)
+    if data.get("tool_name") in ("Agent", "Task") and not data.get("agent_id"):
+        import guard
+        msg = guard.take_unreported()
+        if msg:  # 서브에이전트가 돌아온 직후 메인에게 위반을 알린다
+            print(json.dumps({"decision": "block", "reason": msg}, ensure_ascii=False))
+        return
     path = (data.get("tool_input") or {}).get("file_path") or ""
     if not path:
         return

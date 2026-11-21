@@ -193,11 +193,56 @@ git submodule update --init
 |---|---|---|
 | S | 문구 · 스타일 · 한 파일 단순 수정 | 바로 구현 |
 | M | 한 계층 · 한 기능 안 | 계획 몇 줄 공유 → 구현 |
-| L | 여러 계층, 또는 위험 영역 (`risk_areas` · 인증 · 네트워크 공통 · DI · 플랫폼 설정 · CI/CD · 서버 계약 · 동시성 · 결제) | **planner** 계획 → **사용자 승인** → 구현 → **reviewer** → 반영 → 재검토 1회까지 |
+| L | 여러 계층, 또는 위험 영역 (`risk_areas` · 인증 · 네트워크 공통 · DI · 플랫폼 설정 · CI/CD · 서버 계약 · 동시성 · 결제) | **planner** 계획 → **사용자 승인** → 구현 → **reviewer** → 지적만 반영 → 재검증 (**최대 3라운드**, PASS 면 즉시 종료) |
 
 - 역할은 **planner · reviewer 둘뿐**, 역할마다 에이전트 하나 (같은 일을 여러 모델로 중복 실행하지 않는다 — 토큰).
 - reviewer 에게는 **요구사항과 비교 기준 ref 만** 넘긴다. 구현 설명을 주지 않아야 독립적으로 본다.
 - reviewer 지적은 "반영 / 반영 안 함(이유)" 으로 사용자에게 보고된다.
+
+### 에이전트 작업의 자동 관리 — 사람이 관리할 파일 · 명령 없음
+
+| 기능 | 하는 일 | 강제 방식 |
+|---|---|---|
+| **작업 구간** | 첫 코드 편집 · planner/reviewer 호출 때 **자동 시작** (Codex: 에이전트의 커밋 때). 완료 조건을 통과한 push 때 **자동 종료** — 사용량 집계 후 작업 공간 삭제. 실패 · 중단이면 남아서 이어서 한다 | Claude 훅 · git pre-commit / pre-push |
+| **역할 산출물** | planner → `.harness/_workspace/<브랜치>/plan.md`, reviewer → `review_r<N>.md` (번호는 하네스가 발급, 덮어쓰지 않음). 메인에는 **한 줄**만 돌려준다. 작업 공간은 자기 자신을 gitignore 한다 | 경로 발급 · Guard |
+| **판정 기준** | BLOCKER · MAJOR · MINOR · 미검증(필수). **PASS = verify · 관련 테스트를 실제로 통과 + BLOCKER 0 + MAJOR 0 + 미검증(필수) 0** | 아래 완료 게이트 |
+| **수정 라운드** | 최대 3라운드. 4번째 reviewer 호출은 **거부**되고 사용자에게 보고하라고 안내된다 | Claude 훅 (Codex: `work review-start`) |
+| **완료 게이트** (에이전트의 git push) | 모든 규모: 지금 코드로 `harness verify` 통과 기록. **L**(또는 리뷰를 한 작업): 최신 보고서 PASS · 형식 일치 + 리뷰 시작 때 **소스 해시 = 지금 소스 해시** + 지금 코드로 **관련 테스트 통과 기록** + Guard 위반 없음. 규모는 선언보다 작게 볼 수 없다 (planner 사용 · `risk_areas` · 계층 두 곳 이상 → L) | git pre-push (Claude · Codex), 사람이 직접 하는 push 는 대상 아님 |
+| **자동 정리** | 30일 활동 없음 **그리고** 브랜치가 없거나 base 에 머지됨 **그리고** 지금 브랜치 아님 **그리고** 최근 30일 안에 바뀐 파일 없음일 때만 | 새 작업 시작 때 |
+
+보고서 머리줄 (reviewer 가 쓰고 하네스가 읽는다):
+
+```
+판정: PASS | FIX_REQUIRED
+등급: BLOCKER 0 · MAJOR 0 · MINOR 1 · 미검증(필수) 0
+검사: verify PASS · test PASS (3개)
+```
+
+지금 작업 보기: `harness work current` (산출물 경로 · 규모 · 라운드). 규모 선언: `harness work lane <S|M|L>` (스킬이 부른다).
+
+### Mutation Guard — planner · reviewer 의 역할 위반 (기본 켬)
+
+| 등급 | 무엇을 | 보장 |
+|---|---|---|
+| **사후 검출** | 서브에이전트 시작 · 종료 때 HEAD · index · 바뀐/새 파일 해시를 비교한다. 위반이면 그 단계(계획 · 리뷰 라운드)를 **무효**로 기록하고 메인에게 "결과를 쓰지 말고, 되돌리지도 말고, 사용자에게 보고" 를 돌려준다 | **보장** — git 이 보는 모든 추적 · 비무시 파일 (셸로 쓴 것 · 커밋 · stage 포함) |
+| **사전 차단** | 서브에이전트 안의 파일 편집 도구 · git 쓰기 명령을 실행 전에 막는다 | **최선 노력** — 셸 리디렉션 · 스크립트는 못 막는다 (사후 검출이 잡는다) |
+
+- 허용 범위: planner = 작업 공간만 / reviewer = 작업 공간 + 테스트 폴더의 **새 파일**만. **기존 테스트 수정 · 삭제는 위반**(약화해서 통과시키기 금지).
+- 호출 전부터 있던 변경(dirty · staged)은 baseline 이라 허용, 같은 시간에 메인이 도구로 고친 파일은 제외. 아무것도 되돌리지 않는다.
+- 보지 못하는 것: gitignore 된 파일(빌드 · 캐시) · 저장소 밖. 끄기: `config.json` `"guard": {"enabled": false}`.
+
+### Claude Code 와 Codex 지원 범위
+
+| 기능 | Claude Code | Codex |
+|---|---|---|
+| 규칙 · 스킬 · 역할 | 자동 로드 · 등록 | `AGENTS.md` 지시 · 표 |
+| 작업 구간 자동 시작 | 훅 | 에이전트 환경의 커밋 때 (pre-commit) |
+| 리뷰 라운드 발급 · 3회 상한 | 훅 (자동) | `harness work review-start` (AGENTS.md 지시) |
+| 완료 게이트 · 판정 · 증거 확인 | git pre-push | git pre-push (같음) |
+| Mutation Guard | ✅ 사후 검출 · 사전 차단 | ❌ 훅 · 서브에이전트가 없어 **지원 안 함** |
+| TDD Guard 편집 차단 | ✅ 실행 전 훅 | ⚠️ 차단 없음 — pre-commit · CI 가 완료 조건을 건다 |
+| 토큰 측정 | 역할 · 규모 · 버전 | 구간 · 규모 · 버전 (역할은 main 하나 — 서브에이전트 구분 없음) |
+| 에이전트 환경 판별 | `CLAUDECODE` | `CODEX_*` 환경변수 (확인 못 함 — 아니면 `HARNESS_AGENT=1`) |
 
 ### 스킬 (반복 작업 절차)
 
@@ -206,8 +251,8 @@ git submodule update --init
 | `project-design` | 설계 전 · 구조 재결정 | 묻고 → 사용자가 고르고 → 기록 · 규칙 · 골격 |
 | `feature` | 기능 추가 · 변경 · 리팩토링 | RED(기대한 이유로 실패 확인) → GREEN → REFACTOR → verify → 기능 목록 갱신 |
 | `bugfix` | 버그 | 원인(코드 근거) → 재현 테스트 RED → 수정 GREEN → 재발 방지 제안 |
-| `pr` | 커밋 · PR (**요청할 때만**) | 의도한 파일만 · `<type>: <요약>` · 본문 "테스트" 는 실제 실행 결과만 · 머지 안 함 |
-| `feedback` | 실수 지적 · 반복 지적 · 규칙과 코드 불일치 | 원인 분류 → 가장 강한 재발 방지 수단 → 실제로 잡히는지 확인 → 로그 |
+| `pr` | 커밋 · PR (**요청할 때만**) | 의도한 파일만 · `<type>: <요약>` · 본문 "테스트" 는 실제 실행 결과만 · 머지 안 함. **승격 PR** 은 `harness pr check-promotion` (경로 · 빈 diff · 중복 PR · 필수 검사) 통과 후에만 |
+| `feedback` | 실수 지적 · 반복 지적 · 규칙과 코드 불일치 | **승격 기준**(재발 · 보안 · 아키텍처 · 확정된 결정) → 가장 강한 수단(검사 > 테스트 > 규칙) → **가장 좁은 문서 한 곳에만** (`check-rules` 가 같은 문장 중복 검출) → 실제로 잡히는지 확인 → 로그 |
 
 Claude 는 스킬 설명을 보고 알아서 고르고, `/feature` 처럼 직접 부를 수도 있다. Codex 는 `AGENTS.md` 표를 보고 해당 `SKILL.md` 를 읽는다.
 
@@ -428,6 +473,10 @@ Codex 에는 훅이 없으므로 `core.md` 의 "사용자 승인 없이 하지 �
 | `run <이름> [...]` | `commands` 의 명령 — `codegen`(build_runner) · `format` · `analyze` · 프로젝트가 추가한 것 |
 | `update` | 최신 **정식 릴리스**(`release` 브랜치)를 받고 sync · 구성 검사, 버전 변화 · 커밋 목록 · CHANGELOG 표시. 커밋은 직접 |
 | `stats [--since 2026-11-01]` | 로컬 검사 기록 집계 — 실행 위치별 통과/위반, 규칙별 위반, 차단 · 확인 이유 |
+| `work current` · `work lane <S\|M\|L>` | 지금 작업의 산출물 경로 · 규모 · 라운드 / 규모 선언 (시작 · 종료는 자동) |
+| `usage [--since D] [--compare A B]` | 토큰 실측 — 역할 · 규모 · 하네스 버전별, 도입 전후 비교 |
+| `metrics github [--since D] [--until D]` | PR 유형 · 버그 수정 비율 · CI 최초 통과율 · 실패 job — 하네스 버전별 · 도입 전후 |
+| `pr check-promotion <head> <base>` | 승격 PR 사전 확인 (조회만) |
 
 ---
 
@@ -451,6 +500,8 @@ Codex 에는 훅이 없으므로 `core.md` 의 "사용자 승인 없이 하지 �
 | `tdd` | 꺼짐 | `{"enabled", "paths": [glob…], "exclude": [glob…]}` — TDD Guard 대상 |
 | `layers` | `[]` | `{"files": glob, "forbid": [문자열…], "message", "rule"}` — 경로별 금지 import |
 | `secret_files` · `secret_value_allow` | 코어 + 팩 | 커밋 금지 파일 패턴 · 키 값 검사 제외 파일 |
+| `guard` | 켬 | `{"enabled": false}` 로 Mutation Guard 끄기 |
+| `promotion` | 없음 | 승격 경로, 예: `[["dev","staging"],["staging","main"]]` (`pr check-promotion`) |
 | `protected` | 코어 + 팩 | `bash_deny` · `bash_ask` · `file_deny` · `file_ask` (`[정규식, 이유]`) · `file_allow` (정규식) |
 
 예: `dev` + `main` 전략, 결제 폴더를 위험 영역으로
@@ -612,6 +663,19 @@ $ .harness/core/harness stats
 
 보는 법: 같은 규칙 위반이 계속 나오면 규칙이 실제와 맞지 않거나 더 강한 수단이 필요하다는 신호. 정상 작업이 `deny` 로 자주 막히면 패턴이 너무 넓다는 신호.
 
+### 토큰 실측 (`harness usage`) — 추정이 아니라 세션 기록
+
+| 단위 | 출처 · 방법 |
+|---|---|
+| 작업 구간 | 작업 시작 ~ 완료 게이트 통과. Claude: 메인 세션 + `subagents/*.meta.json` 의 역할(`agentType`), `message.id` 로 중복 제거 / Codex: `token_count` 누적값의 구간 증분. 규모 · 하네스 버전 · 라운드와 함께 `.harness/out/usage.jsonl` 에 숫자만 |
+| 브랜치 (과거 포함) | 작업 기록이 없던 때도 Claude 기록의 `gitBranch` 로 묶고, 그 시각 base 브랜치의 `.harness/core` 포인터로 버전을 찾는다 (`도입 전` 포함) |
+
+`harness usage --compare 0.3.0 0.4.0` 은 두 버전의 실측 중앙값을 규모별로 비교하고 표본이 5개 미만이면 "표본 부족" 으로 표시한다. 대화 · 코드 원문과 비용은 남기지 않는다. 측정 실패는 경고만 하고 작업을 막지 않는다.
+
+### GitHub 지표 (`harness metrics github`)
+
+머지된 작업 PR(승격 · 역반영 제외)의 유형 비율 · 버그 수정 비율(fix / feat+fix+refactor) · PR 당 커밋, CI 성공률 · **최초 통과율**((워크플로, 출발 브랜치)별 첫 실행) · 실패 job 빈도를, PR 머지 커밋 · CI head 커밋의 `.harness/core` 포인터로 **하네스 버전별 · 도입 전후**로 나눠 보여 준다. 조회만 하며 결과는 `.harness/out/metrics/` (gitignore). 정의는 `harness metrics github -h`.
+
 ---
 
 ## 15. 문제 해결
@@ -665,9 +729,12 @@ bash tests/flutter_fixture.sh               # 실제 Flutter 앱 fixture — flu
 
 | 항목 | 방법 | 결과 |
 |---|---|---|
-| 회귀 테스트 41개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 · 자동 릴리스(릴리스 없음 · patch · minor · 깨지는 변경 · 중복 방지 · fast-forward · main 불변 · dry-run) · TDD Guard(꺼짐 · 차단 · 컴파일 RED · behavior RED → GREEN · GREEN 후 변경 · 커밋 후 재잠금 · 다른 기능 RED 무효 · 커밋 차단 · 예외 승인 · CI RED 재현 · 변경 전 통과 테스트 거부 · 테스트 없는 변경 거부) · 요구사항 추적(연결 · 조회 · 위반 6종 · 구현 전 경고 · 요구사항 커버리지 · 기본 marker · check-code 연동 · 꺼짐) | ✅ (Python 3.9) |
+| 회귀 테스트 72개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 · 자동 릴리스(릴리스 없음 · patch · minor · 깨지는 변경 · 중복 방지 · fast-forward · main 불변 · dry-run) · TDD Guard(꺼짐 · 차단 · 컴파일 RED · behavior RED → GREEN · GREEN 후 변경 · 커밋 후 재잠금 · 다른 기능 RED 무효 · 커밋 차단 · 예외 승인 · CI RED 재현 · 변경 전 통과 테스트 거부 · 테스트 없는 변경 거부) · 요구사항 추적(연결 · 조회 · 위반 6종 · 구현 전 경고 · 요구사항 커버리지 · 기본 marker · check-code 연동 · 꺼짐) · 작업 구간(자동 시작 · 자기 무시 · 라운드 상한 · S verify · L 게이트 · 리뷰 뒤 소스 변경 · 리뷰어 새 테스트 · 위험 영역 L · 커밋 뒤 증거 유지 · push 시 정리 · 사람 push 제외 · 안전한 30일 정리 · settings 동기화) · Mutation Guard(baseline · planner 위반 · 되돌리지 않음 · 새 테스트 허용 · 기존 테스트 수정/삭제 · stage/커밋 · 메인 편집 제외 · 사전 차단 · 게이트 무효 · 종료 전 알림 · 끄기) · 토큰 실측(중복 제거 · 구간 · 역할 · Codex 증분 · 원문 미저장 · 도입 전 · 보고/비교 · 종료 시 기록) · 규칙 중복 · 승격 PR · GitHub 지표 | ✅ (Python 3.9) |
 | 실제 Flutter 앱 | 서브모듈 추가 → init → fvm 3.35.0 · `flutter create` → 린트 템플릿 · Riverpod · go_router · logger · mocktail → 골격 · 규칙 · layers → `harness test` · `run analyze` · `verify` | ✅ 테스트 통과 · 분석 0건 · verify 통과 · `flutter create` 가 `.gitignore` · `AGENTS.md` 를 덮어쓰지 않음 |
 | 위반 검출 (실제 앱) | domain 에 `material.dart` import · `print` · 포맷 깨짐 | ✅ `layer` · `logging` · `dart-format` · `analyze-warning` · `analyze-info` |
 | Claude 규칙 · 스킬 · 역할 로드 | 헤드리스 세션 기록 (Claude Code 2.1.322 · 2.1.328) | ✅ 시작 시 `CLAUDE.md` · `core.md` · `project.md`, `lib/main.dart` 를 읽으면 `architecture.md` · `flutter.md` 추가 (`testing.md` 는 안 읽힘 — 의도대로). 스킬 5 · 역할 2 등록. (2.1.328 은 임시 폴더에서 링크 없는 `CLAUDE.md` 도 읽지 않아 — 폴더 신뢰 · 경로 요인 — 규칙 로드는 2.1.322 로 확인, 스킬 · 역할 등록은 두 버전 모두 확인) |
 | Flutter 팩 fixture (`tests/flutter_fixture.sh`) | init → `flutter create` 가 진입점을 덮어쓰지 않음 → verify 통과 → 위반 7종 검출 → 원복 후 통과 → `harness test` · `flutter analyze` → TDD Guard 전체 흐름(실제 `flutter test`, CI RED 재현은 변경 전 worktree 에서) | ✅ |
-| Codex | 이 머신에 Codex CLI 가 없어 실행 확인 못 함 | ⚠️ `AGENTS.md` 생성 · 링크만 정적 확인 |
+| Mutation Guard (실제 Claude Code 2.1.328) | 헤드리스 세션에서 reviewer 서브에이전트가 Write · 셸 · 새 테스트를 시도 | ✅ Write 사전 차단 · 셸 쓰기 사후 검출 → 메인에 "결과 무효 · 되돌리지 말고 보고" · 새 테스트 허용 · 파일 미복원 |
+| 토큰 실측 (실제 기록) | 위 세션 · 꼬붕단 iOS 세션 기록(읽기만) | ✅ main 62.2K · reviewer 20.8K(1회) 역할 구분 · 브랜치 16개 `도입 전` 분류 |
+| GitHub 지표 (실제 GitHub) | 이 템플릿 레포 | ✅ 작업 PR 3 · CI 15회 · 최초 통과율 33.3% · 실패 job `Flutter pack fixture` 3 (실제 이력과 일치) |
+| Codex | 이 머신에 Codex CLI 가 없어 실행 확인 못 함 | ⚠️ `AGENTS.md` 생성 · 링크 · 기록 파싱(가짜 기록)만 확인 |

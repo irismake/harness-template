@@ -17,8 +17,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import events  # noqa: E402
+import guard  # noqa: E402
 import tdd  # noqa: E402
-from lib import ROOT, load_config  # noqa: E402
+import work  # noqa: E402
+from lib import LOCAL_DIRS, ROOT, load_config  # noqa: E402
+
+WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+AGENT_TOOLS = {"Agent", "Task"}
+ROLES = {"planner", "reviewer"}
 
 
 def decide(decision, reason):
@@ -50,8 +56,25 @@ def pushes_protected_branch(command, protected):
 def main():
     data = json.load(sys.stdin)
     tool = data.get("tool_name")
+    if tool not in WRITE_TOOLS | AGENT_TOOLS | {"Bash"}:
+        sys.exit(0)  # 읽기 도구는 바로 통과
     tool_input = data.get("tool_input") or {}
     cfg = load_config()
+    session = data.get("session_id")
+    sub_role = data.get("agent_type") if data.get("agent_id") else None
+
+    if sub_role in ROLES and tool in WRITE_TOOLS | {"Bash"}:  # Mutation Guard 사전 차단 (최선 노력)
+        reason = guard.realtime(cfg, sub_role, tool, tool_input)
+        if reason:
+            decide("deny", reason)
+
+    if tool in AGENT_TOOLS:
+        role = tool_input.get("subagent_type")
+        if role in ROLES:
+            ok, msg = work.start_role(cfg, role, session)
+            if not ok:
+                decide("deny", msg)
+        sys.exit(0)
     rules = cfg.get("protected", {})
 
     if tool == "Bash":
@@ -65,8 +88,10 @@ def main():
         for pattern, reason in rules.get("bash_ask", []):
             if re.search(pattern, command):
                 decide("ask", reason)
-    elif tool in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
+    elif tool in WRITE_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        if not sub_role:
+            _ensure_work(path, session)
         for pattern in rules.get("file_allow", []):
             if re.search(pattern, path):
                 sys.exit(0)
@@ -78,6 +103,17 @@ def main():
                 decide("ask", reason)
         tdd_gate(cfg, path)
     sys.exit(0)
+
+
+def _ensure_work(path, session):
+    """프로젝트 파일을 고치기 시작하면 작업 구간을 자동으로 연다 (에이전트가 따로 부르지 않아도 된다)."""
+    try:
+        rel = Path(path).resolve().relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return
+    if not rel.startswith((*LOCAL_DIRS, ".harness/core/", ".git/")):
+        work.ensure("claude", session)
+        guard.note_main_write(rel)
 
 
 def tdd_gate(cfg, path):
