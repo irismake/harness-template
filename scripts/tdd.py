@@ -8,7 +8,7 @@ TDD Guard — 테스트가 먼저 실패한 증거가 있어야 기능 코드를
 
   편집 잠금 해제   연결된 테스트에 RED(fail 또는 load_error) 기록이 있다            → Claude 실행 전 훅이 확인
   완료 조건        연결된 테스트 하나가 behavior RED(fail) → 그 뒤 GREEN(pass) 이고,
-                  RED · GREEN 의 테스트 내용은 같고 대상 내용은 다르며 (구현이 바뀌어 통과),
+                  RED · GREEN 의 테스트는 같고(공백 차이 무시) 그 사이 연결된 대상 파일이 바뀌었으며 (구현이 바뀌어 통과),
                   GREEN 때의 대상 · 테스트 내용이 지금과 같다                       → 종료 전 훅 · verify · pre-commit
   Bash 감지       Bash 명령 전후로 HEAD 와 다른 대상 파일의 내용을 비교해, 명령이 RED 없이 대상을 바꿨으면 바로 알린다
                   (Claude 실행 전 · 후 훅 — 비교 파일은 명령마다 하나, 끝나면 지운다)
@@ -76,6 +76,11 @@ def digest(text):
     return hashlib.sha256(text.encode()).hexdigest()[:16] if text is not None else None
 
 
+def shape(text):
+    """공백을 뺀 내용의 해시 — 포맷(공백 · 줄바꿈)만 다른 테스트를 같은 테스트로 본다."""
+    return digest(re.sub(r"\s+", "", text)) if text is not None else None
+
+
 def content(rel, root=ROOT, staged=False):
     if staged:
         r = subprocess.run(["git", "-C", str(root), "show", f":{rel}"], capture_output=True, text=True)
@@ -123,11 +128,13 @@ def record_run(cfg, results):
     files = tracked_files()
     guarded = [f for f in files if is_guarded(cfg, f)]
     hashes = {t: digest(content(t)) for t in results}
+    shapes = {t: shape(content(t)) for t in results}
     for src in guarded:
         if set(linked_tests(cfg, src, files=files)) & set(results):
             hashes[src] = digest(content(src))
     state = load_state()
-    state["runs"].append({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "results": results, "hashes": hashes})
+    state["runs"].append({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "results": results,
+                          "hashes": hashes, "shapes": shapes})
     state["runs"] = state["runs"][-200:]
     save_state(state)
 
@@ -217,8 +224,10 @@ def bash_after(cfg, tool_use_id):
 def cycle(cfg, src, staged=False):
     """(완료 여부, 메시지) — behavior RED → GREEN, GREEN 때 내용 = 지금 내용
 
-    GREEN 으로 인정하려면 그 전에 **같은 테스트 내용**으로 실패한 기록이 있고, 그때의 대상 내용이 GREEN 때와 달라야 한다
-    (테스트는 그대로 · 구현이 바뀌어 통과). 테스트만 고쳐 통과시키거나, 테스트를 바꾼 뒤 RED 를 다시 보지 않은 것은 인정하지 않는다.
+    GREEN 으로 인정하려면 그 전에 **같은 테스트**(공백 차이는 무시)로 실패한 기록이 있고, 그 RED 와 GREEN 사이에
+    **그 테스트에 연결된 대상 파일 중 하나 이상**이 바뀌어야 한다 (테스트는 그대로 · 구현이 바뀌어 통과).
+    같은 사이클에서 만든 선언 파일(모델 · 인터페이스)은 자기 내용이 그대로여도 인정된다.
+    테스트만 고쳐 통과시키거나, 테스트 내용을 바꾼 뒤 RED 를 다시 보지 않은 것은 인정하지 않는다.
     """
     now = content(src, staged=staged)
     if skip_valid(src, now):
@@ -226,18 +235,37 @@ def cycle(cfg, src, staged=False):
     tests = linked_tests(cfg, src)
     if not tests:
         return False, "연결된 테스트가 없다 — 이 파일을 import 하는 테스트를 먼저 쓴다"
-    reds = {t: [] for t in tests}  # 테스트별 behavior RED 때의 (테스트 해시, 대상 해시)
+    files = tracked_files()
+    linked = {}  # 대상 파일 → 연결된 테스트 (판정 중 한 번만 찾는다)
+
+    def same_test(red, run, t):
+        rs, gs = (red.get("shapes") or {}).get(t), (run.get("shapes") or {}).get(t)
+        if rs is not None and gs is not None:
+            return rs == gs
+        return red["hashes"].get(t) == run["hashes"].get(t)  # 테스트 모양 해시가 없는 이전 기록
+
+    def impl_changed(red, run, t):
+        for f in set(red["hashes"]) | set(run["hashes"]):
+            if f == t or is_test(cfg, f) or not is_guarded(cfg, f):
+                continue
+            if f not in linked:
+                linked[f] = linked_tests(cfg, f, files=files)
+            if t in linked[f] and red["hashes"].get(f) != run["hashes"].get(f):
+                return True
+        return False
+
+    reds = {t: [] for t in tests}  # 테스트별 behavior RED 기록
     load_red = stale_green = unproven_green = False
     for run in load_state()["runs"]:
         for t in tests:
             st = run["results"].get(t)
             if st == "fail":
-                reds[t].append((run["hashes"].get(t), run["hashes"].get(src)))
+                reds[t].append(run)
             elif st == "load_error":
                 load_red = True
             elif st == "pass" and reds[t]:
                 t_hash, src_hash = run["hashes"].get(t), run["hashes"].get(src)
-                if not any(rt == t_hash and rs != src_hash for rt, rs in reds[t]):
+                if not any(same_test(red, run, t) and impl_changed(red, run, t) for red in reds[t]):
                     unproven_green = True
                 elif src_hash == digest(now) and t_hash == digest(content(t, staged=staged)):
                     return True, f"RED → GREEN: {t}"
