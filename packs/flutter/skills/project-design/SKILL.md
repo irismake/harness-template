@@ -65,21 +65,22 @@ description: 새 Flutter 앱의 설계부터 시작한다 — 무엇을 만들�
 순서대로 하고, 실패하면 멈추고 보고한다.
 
 1. **결정 기록**: `.harness/decisions/0001-initial-design.md` (`decisions/README.md` 형식 — 모든 주제의 선택 · 대안 · 이유).
-2. **앱 골격** (기존 앱이면 건너뜀)
+2. **설정** (`.harness/config.json`) — **골격보다 먼저** 쓴다 (TDD Guard · 계층 검사가 골격부터 적용되게): `base_branch` · `protected_branches` · `layers`(카탈로그 B2) · `risk_areas`(네트워크 · 인증 · 결제 폴더) · `tdd`(카탈로그 D — TDD Guard 를 켰으면 대상 경로). `design_done` 은 아직 `false` 로 두고 6단계 끝에서 `true` 로 바꾼다.
+3. **앱 골격** (기존 앱이면 건너뜀)
    - fvm 을 골랐으면 `fvm use <버전> --force` → `.fvmrc`. 이후 `flutter` · `dart` 명령은 `fvm` 을 붙인다.
    - `flutter create --org <조직 ID> --project-name <패키지 이름> --platforms <고른 플랫폼> .`
    - `analysis_options.yaml` 을 `.harness/core/packs/flutter/templates/analysis_options.yaml` 내용으로 바꾼다.
    - 패키지: `flutter pub add <패키지들>` · `flutter pub add --dev <패키지들>` (6단계에서 승인한 목록만. Claude 는 훅이 확인 창을 띄운다).
-   - 폴더 구조 · 앱 시작 코드(`main.dart` · `app.dart`) · 라우터 · 테마 · 로거 · (백엔드가 있으면) 네트워크 클라이언트 · 오류 타입 · 환경 값 읽기를 **최소한으로** 만든다. 기능 화면은 만들지 않는다 (첫 화면 하나만 자리 표시).
+   - 폴더 구조 · 앱 시작 코드(`main.dart` · `app.dart`) · 라우터 · 테마 · 로거 · 오류 타입 · 환경 값 읽기를 **최소한으로** 만든다. 기능 화면은 만들지 않는다 (첫 화면 하나만 자리 표시).
+   - **TDD Guard 대상 경로(`tdd.paths`)의 코드는 골격에서 만들지 않는다** — 네트워크 클라이언트 · 저장소 · 상태 등은 기능 목록의 첫 기능에 넣고 `feature` 스킬로 테스트부터 만든다.
    - `.gitignore` 는 `harness init` 이 Flutter 기본 항목 · `env/*.json` 까지 넣어 두었다 (`flutter create` 는 있는 `.gitignore` 를 덮어쓰지 않는다). 빠진 것만 더한다.
    - 환경 분리를 골랐으면 `env/dev.example.json` · `env/prod.example.json` 을 만든다 (실제 값 파일 `env/<환경>.json` 은 사용자가 만든다).
    - 생성 파일을 커밋하지 않기로 했으면 `.gitignore` 에 `*.g.dart` · `*.freezed.dart` 등을 넣는다.
    - 스모크 테스트 `test/app_test.dart` (앱이 첫 화면을 그린다) — 프로젝트 테스트 구조의 예시가 된다.
    - `flutter create` 가 만든 기본 카운터 예제 코드 · 테스트는 지운다.
-3. **프로젝트 규칙** (`.harness/rules/`, frontmatter `description` · `paths` 필수)
+4. **프로젝트 규칙** (`.harness/rules/`, frontmatter `description` · `paths` 필수)
    - `project.md` 를 채운다 (템플릿의 "설계 전" 문구는 지운다, 60줄 이내).
    - `architecture.md` (`paths: ["lib/**"]`) · 필요하면 `data.md` — 카탈로그의 "규칙에 쓸 것" 중 **고른 것만**, 실제로 만든 폴더 · 파일 이름으로 쓴다. 코드에서 알 수 있는 것은 옮겨 적지 않고 위치를 가리킨다.
-4. **설정** (`.harness/config.json`): `design_done: true` · `base_branch` · `protected_branches` · `layers`(카탈로그 B2) · `risk_areas`(네트워크 · 인증 · 결제 폴더) · `tdd`(카탈로그 D — TDD Guard 를 켰으면 대상 경로).
 5. **CI**: `.github/workflows/ci.yml` 의 `push.branches` 를 보호 브랜치에 맞춘다. 빌드 확인을 골랐으면 Android(`flutter build apk --debug`) · iOS(`macos` 러너, `flutter build ios --no-codesign`) job 을 추가한다.
 6. **동기화 · 확인**
    - `.harness/core/harness sync`
@@ -88,6 +89,7 @@ description: 새 Flutter 앱의 설계부터 시작한다 — 무엇을 만들�
    - `.harness/core/harness run analyze`
    - `.harness/core/harness verify`
    - 일부러 계층 위반 import 를 한 줄 넣어 `layer` 검사가 잡는지 확인하고 되돌린다 (`layers` 를 만들었을 때).
+   - 모두 통과하면 `config.json` `design_done` 을 `true` 로 바꾼다.
 
 ### 8. 보고 · 다음 단계
 

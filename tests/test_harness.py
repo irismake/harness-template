@@ -556,6 +556,124 @@ class TddGuardTest(unittest.TestCase):
         self.assertEqual(self.p.commit("feat: 채팅 보내기").returncode, 0)
         self.assertEqual(self.edit(CHAT), "deny")
 
+    # ── RED 이후 구현이 바뀌어야 GREEN (테스트만 고쳐 통과시키기 차단) ──
+
+    def test_fixing_only_the_test_is_not_red_to_green(self):
+        # 구현을 먼저 썼다 (셸 등) → 틀린 기대값으로 실패 → 테스트만 고쳐 통과
+        self.p.write(CHAT, "void send() {}\n")
+        self.write_chat_test("sned")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)
+        self.write_chat_test("send")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertTrue(any("RED 이후 구현이 바뀌지 않았다" in l for l in self.tdd_problems()), self.tdd_problems())
+        # 구현에 주석만 더해도 지금 테스트로 실패한 적이 없으므로 여전히 미완료
+        self.p.write(CHAT, "void send() {}\n// 주석\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertTrue(any("RED 이후 구현이 바뀌지 않았다" in l for l in self.tdd_problems()), self.tdd_problems())
+
+    def test_test_written_after_code_is_not_red_to_green(self):
+        self.p.write(CHAT, "void send() {}\n")
+        self.write_chat_test("send")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertTrue(any("RED 미확인" in l for l in self.tdd_problems()), self.tdd_problems())
+
+    def test_refining_test_after_red_then_rerun_completes(self):
+        # 정상 흐름: RED → 테스트를 다듬음 → 다시 실행해 RED 확인 → 구현 → GREEN
+        self.write_chat_test("send")
+        self.test(CHAT_TEST)                              # load_error
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)  # fail (골격)
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} send\n// EXPECT {CHAT} receive\nimport 'package:my_app/features/chat/domain/chat.dart';\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)  # 바뀐 테스트로 다시 RED
+        self.p.write(CHAT, "void send() {}\nvoid receive() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)
+        self.assertEqual(self.tdd_problems(), [])
+
+    def test_changing_test_after_red_needs_red_again(self):
+        self.write_chat_test("send")
+        self.p.write(CHAT, "void stub() {}\n")
+        self.assertNotEqual(self.test(CHAT_TEST).returncode, 0)  # fail (골격, 테스트 v1)
+        self.p.write(CHAT_TEST, f"// EXPECT {CHAT} send\n// 바뀐 테스트\nimport 'package:my_app/features/chat/domain/chat.dart';\n")
+        self.p.write(CHAT, "void send() {}\n")
+        self.assertEqual(self.test(CHAT_TEST).returncode, 0)     # 테스트 v2 로는 실패한 적이 없다
+        self.assertTrue(any("RED 이후 구현이 바뀌지 않았다" in l for l in self.tdd_problems()), self.tdd_problems())
+
+    # ── Bash 로 대상 코드를 쓰면 바로 알린다 (명령 전후 비교) ──
+
+    def bash(self, command, tid="t1", pre=True):
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": tid}
+        if pre:
+            self.assertEqual(self.p.decision(payload), "allow")
+        self.p.run("sh", "-c", command)
+        return self.p.hook("post_edit", payload)
+
+    def bash_dir(self):
+        d = self.p.root / ".harness/out/bash"
+        return sorted(x.name for x in d.iterdir()) if d.exists() else []
+
+    def assert_caught(self, r, rel):
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("[TDD Guard]", r.stderr)
+        self.assertIn(rel, r.stderr)
+
+    def test_bash_write_without_red_is_caught(self):
+        self.assert_caught(self.bash(f"mkdir -p $(dirname {CHAT}) && cat > {CHAT} <<'EOF'\nvoid send() {{}}\nEOF"), CHAT)
+        self.assertEqual(self.bash_dir(), [], "명령마다 쓴 비교 파일은 끝나면 지운다")
+
+    def test_bash_edit_of_committed_file_is_caught(self):
+        self.assert_caught(self.bash(f"sed -i.bak 's/1/2/' {PAY} && rm {PAY}.bak"), PAY)
+
+    def test_bash_move_and_copy_keeping_mtime_are_caught(self):
+        # 수정 시각을 보존하는 mv · cp -p 도 잡는다 (시각 기반 감지의 빈틈)
+        self.p.write("tmp_chat.dart", "void send() {}\n")
+        self.p.write("tmp_pay.dart", "int pay() => 5;\n")
+        os.utime(self.p.root / "tmp_chat.dart", (1, 1))
+        os.utime(self.p.root / "tmp_pay.dart", (1, 1))
+        self.assert_caught(self.bash(f"mkdir -p $(dirname {CHAT}) && mv tmp_chat.dart {CHAT}"), CHAT)
+        self.assert_caught(self.bash(f"cp -p tmp_pay.dart {PAY}", tid="t2"), PAY)
+
+    def test_bash_write_after_red_is_allowed(self):
+        self.write_chat_test()
+        self.test(CHAT_TEST)
+        r = self.bash(f"mkdir -p $(dirname {CHAT}) && echo 'void send() {{}}' > {CHAT}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_bash_writes_outside_guard_are_allowed(self):
+        for i, cmd in enumerate([
+            f"mkdir -p $(dirname {CHAT_TEST}) && echo '// t' > {CHAT_TEST}",               # 테스트
+            "mkdir -p lib/features/chat/presentation && echo 'x' > lib/features/chat/presentation/chat_screen.dart",  # 대상 밖
+            "mkdir -p lib/features/chat/domain && echo 'x' > lib/features/chat/domain/chat.g.dart",                  # 생성 파일
+            "echo '# doc' > README.md",
+            "git status --short",                                                          # 읽기 전용
+            f"rm {PAY}",                                                                   # 삭제는 우회가 아니다
+        ]):
+            r = self.bash(cmd, tid=f"t{i}")
+            self.assertEqual(r.returncode, 0, f"{cmd}\n{r.stderr}")
+        self.assertEqual(self.bash_dir(), [])
+
+    def test_bash_does_not_blame_files_dirty_before_the_command(self):
+        self.p.write(CHAT, "void send() {}\n")  # 명령 전부터 고쳐져 있던 파일 (사람 · 다른 도구)
+        r = self.bash("echo '# doc' > README.md")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.tdd_problems(), "완료 검사는 그대로 잡는다")
+
+    def test_bash_without_pre_snapshot_falls_back_to_all_dirty_files(self):
+        r = self.bash(f"mkdir -p $(dirname {CHAT}) && echo 'void send() {{}}' > {CHAT}", pre=False)
+        self.assert_caught(r, CHAT)
+
+    def test_bash_check_is_off_when_guard_disabled(self):
+        cfg = json.loads((self.p.root / ".harness/config.json").read_text())
+        cfg["tdd"]["enabled"] = False
+        (self.p.root / ".harness/config.json").write_text(json.dumps(cfg))
+        r = self.bash(f"mkdir -p $(dirname {CHAT}) && echo 'void send() {{}}' > {CHAT}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.bash_dir(), [], "꺼져 있으면 비교 파일도 만들지 않는다")
+
+    def test_post_tool_hook_covers_bash(self):
+        settings = json.loads((self.p.root / ".claude/settings.json").read_text())
+        matchers = [m.get("matcher", "") for m in settings["hooks"]["PostToolUse"]]
+        self.assertTrue(any("Bash" in m.split("|") for m in matchers), matchers)
+
     def test_red_of_other_feature_does_not_unlock(self):
         self.write_chat_test()
         self.test(CHAT_TEST)

@@ -355,7 +355,7 @@ harness-template/
 | # | 지점 | 언제 | 무엇을 | 위반 시 |
 |---|---|---|---|---|
 | 1 | Claude **실행 전 훅** (`pre_tool.py`) | 명령 · 파일 편집 직전 | 위험 명령 · 보호 파일 ([9장](#9-보호-장치--막는-것--묻는-것)) | 차단 또는 확인 창 |
-| 2 | Claude **편집 직후 훅** (`post_edit.py`) | `.dart` 파일 하나 고친 직후 | 그 파일의 코드 검사 + 포맷 + 분석 | Claude 에게 결과를 돌려줘 **그 자리에서 고치게** 한다 |
+| 2 | Claude **편집 직후 훅** (`post_edit.py`) | `.dart` 파일 하나 고친 직후 · Bash 명령 직후 | 그 파일의 코드 검사 + 포맷 + 분석 / (TDD Guard) Bash 가 RED 없이 바꾼 대상 파일 | Claude 에게 결과를 돌려줘 **그 자리에서 고치게** 한다 |
 | 3 | Claude **종료 전 훅** (`stop.py`) = `harness verify` | 응답을 끝내기 전 | 하네스 구성 + 작업 브랜치 전체 변경분 | 한 번 막고 고치게 한다. 두 번째는 보고하게 둔다 (무한 반복 방지) |
 | 4 | **git 훅** (`pre-commit` · `commit-msg`) | 커밋할 때 (Claude · Codex · 사람 공통) | stage 된 변경 + 포맷 · 분석, 하네스 파일이 바뀌었으면 구성 검사 / 메시지 형식 | 커밋 거부 |
 | 5 | **CI** (`Harness` · `Flutter` job) | PR · main push · merge queue | 구성 검사 + PR 변경분 코드 검사 (줄 단위 PR 주석) / 포맷 · `flutter analyze` · `flutter test` | PR 실패 — Required check 로 지정하면 머지 불가 |
@@ -375,7 +375,7 @@ harness-template/
 | `logging` | `lib/` 에서 `print` · `debugPrint` | Flutter 팩 |
 | `sensitive-log` | 로그 호출 문자열 보간에 token · password · secret · authorization · cookie 등 (`${token != null}` 처럼 상태만은 허용) | Flutter 팩 |
 | `dart-format` · `analyze-*` | `dart format` · `dart analyze` (프로젝트 `analysis_options.yaml`) — dart 가 없거나 `pub get` 전이면 건너뜀 | Flutter 팩 (`--lint`) |
-| `tdd` | TDD Guard 대상 파일에 behavior RED → GREEN 기록이 없거나 GREEN 이후 바뀜 (켰을 때만) | 공통 (`scripts/tdd.py`) |
+| `tdd` | TDD Guard 대상 파일에 behavior RED → GREEN 기록이 없거나(RED 이후 구현이 바뀌지 않은 GREEN 포함) GREEN 이후 바뀜 (켰을 때만) | 공통 (`scripts/tdd.py`) |
 | `trace` | 요구사항 → 시나리오 → 테스트 연결이 끊김 · 중복 · 정의 없는 ID (켰을 때만) | 공통 (`scripts/traceability.py`) |
 | (프로젝트 ID) | `.harness/checks.py` 에 프로젝트가 추가한 검사 | 프로젝트 |
 
@@ -426,14 +426,15 @@ TDD Guard 는 "테스트를 먼저 썼고 통과했다" 를 보장한다. **그 
 | 기능 코드 편집 시도 | **연결된 테스트**(그 파일을 import 하거나 짝 경로 `test/…_test.dart`)에 RED 기록이 없으면 Claude 실행 전 훅이 **차단** — "[TDD Guard] … RED 미확인" |
 | `harness test <테스트>` | 실제 결과를 구조화해 기록 (`.harness/out/tdd.json`): 테스트별 `pass` · `fail`(동작 실패) · `load_error`(컴파일 실패) + 테스트 · 대상 파일 내용 해시 |
 | RED 확인 | 실패 기록이 생기면 **그 테스트와 연결된 파일만** 잠금 해제 (채팅 테스트의 RED 로 결제 코드는 안 풀린다) |
-| 구현 → GREEN | 컴파일 실패만으로는 부족 — **behavior RED → GREEN** 이 있어야 완료 (새 타입은 골격 → 동작 실패 확인 → 구현) |
+| Bash 로 기능 코드 쓰기 | 실행 전 · 후 훅이 HEAD 와 다른 대상 파일의 **내용**을 비교해, 명령이 RED 없이 대상을 바꿨으면 바로 알린다 (`cat >` · `sed -i` · `mv` · `cp -p` 모두. 비교 파일은 명령마다 하나, 끝나면 지운다) |
+| 구현 → GREEN | 컴파일 실패만으로는 부족 — **behavior RED → GREEN** 이 있어야 완료 (새 타입은 골격 → 동작 실패 확인 → 구현). RED · GREEN 의 **테스트 내용은 같고 대상 내용은 달라야** 한다 — 테스트만 고쳐 통과시키거나, 테스트를 바꾼 뒤 RED 를 다시 보지 않으면 인정하지 않는다 |
 | 종료 전 · verify · pre-commit | 바뀐 대상 파일마다 완료 조건 + "GREEN 때 내용 = 지금 내용" 확인, 아니면 차단 (`[tdd]`) |
 | 커밋 | post-commit 훅이 커밋한 파일의 기록을 지운다 → 다음 변경은 새 RED 필요 (기록 재사용 방지) |
 | PR CI | `harness tdd ci` — 바뀐 테스트를 **변경 전 코드**에서 실행해 실패하는지(RED 재현), 변경 후 통과하는지(GREEN). 로컬 기록 위조 · 훅 우회 · Codex 작업도 여기서 걸린다 |
 | 예외 | 테스트로 고정할 동작이 없을 때(동작 변화 없는 리팩토링 등): `harness tdd skip <파일> --reason …` — **사용자 확인 창**, `.harness/tdd-skip.json` 에 기록되어 PR 에 보인다, 파일 내용이 바뀌면 무효 |
 
 상태 보기: `harness tdd status [파일…]` (연결된 테스트 · 편집 허용 여부 · 완료 여부).
-한계: 셸로 직접 파일을 쓰면 실행 전 훅을 피할 수 있다 → 종료 전 · pre-commit · CI 가 다시 잡는다. 테스트가 **올바른 동작**을 검사하는지는 reviewer · 사람이 본다.
+한계: Claude 훅이 없는 에이전트(Codex)의 셸 쓰기는 종료 전 · pre-commit · CI 가 잡는다. **새로 만든** 대상 파일은 변경 전 코드에 없어 CI 의 RED 재현이 언제나 컴파일 실패로 성립한다 — 새 파일의 TDD 증거는 로컬 검사(종료 전 · pre-commit)가 맡는다. 구현을 일부러 망가뜨렸다 되돌리는 식의 의도적 위조와, 테스트가 **올바른 동작**을 검사하는지는 reviewer · 사람이 본다.
 
 ---
 
@@ -729,7 +730,7 @@ bash tests/flutter_fixture.sh               # 실제 Flutter 앱 fixture — flu
 
 | 항목 | 방법 | 결과 |
 |---|---|---|
-| 회귀 테스트 72개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 · 자동 릴리스(릴리스 없음 · patch · minor · 깨지는 변경 · 중복 방지 · fast-forward · main 불변 · dry-run) · TDD Guard(꺼짐 · 차단 · 컴파일 RED · behavior RED → GREEN · GREEN 후 변경 · 커밋 후 재잠금 · 다른 기능 RED 무효 · 커밋 차단 · 예외 승인 · CI RED 재현 · 변경 전 통과 테스트 거부 · 테스트 없는 변경 거부) · 요구사항 추적(연결 · 조회 · 위반 6종 · 구현 전 경고 · 요구사항 커버리지 · 기본 marker · check-code 연동 · 꺼짐) · 작업 구간(자동 시작 · 자기 무시 · 라운드 상한 · S verify · L 게이트 · 리뷰 뒤 소스 변경 · 리뷰어 새 테스트 · 위험 영역 L · 커밋 뒤 증거 유지 · push 시 정리 · 사람 push 제외 · 안전한 30일 정리 · settings 동기화) · Mutation Guard(baseline · planner 위반 · 되돌리지 않음 · 새 테스트 허용 · 기존 테스트 수정/삭제 · stage/커밋 · 메인 편집 제외 · 사전 차단 · 게이트 무효 · 종료 전 알림 · 끄기) · 토큰 실측(중복 제거 · 구간 · 역할 · Codex 증분 · 원문 미저장 · 도입 전 · 보고/비교 · 종료 시 기록) · 규칙 중복 · 승격 PR · GitHub 지표 | ✅ (Python 3.9) |
+| 회귀 테스트 85개 | init · 재실행 안전 · 구성 검사 · sync 복구 · 사본 거부 · 프로젝트 스킬 우선 · Secret · 로그 · 계층 · 기존 위반 제외 · 프로젝트 검사 · git 훅 · 편집 직후 · 종료 전 훅 · 실행 전 훅 명령 13종 · 파일 12종 · 보호 브랜치 설정 · 서브모듈 수정 감지 · release 브랜치만 추적 · 새 릴리스 받기 · `-b` 없이 추가 시 보정 · 이전 릴리스 → 지금 업그레이드 · 자동 릴리스(릴리스 없음 · patch · minor · 깨지는 변경 · 중복 방지 · fast-forward · main 불변 · dry-run) · TDD Guard(꺼짐 · 차단 · 컴파일 RED · behavior RED → GREEN · GREEN 후 변경 · 커밋 후 재잠금 · 다른 기능 RED 무효 · 커밋 차단 · 예외 승인 · CI RED 재현 · 변경 전 통과 테스트 거부 · 테스트 없는 변경 거부 · 테스트만 고친 GREEN 거부 · 테스트 변경 후 RED 재확인 · Bash 쓰기 감지(리다이렉션 · sed · mv · cp -p · 실행 전 상태 없음) · Bash 오탐 없음(RED 뒤 · 테스트 · 대상 밖 · 생성 파일 · 읽기 · 삭제 · 명령 전 변경 · 꺼짐) · 실행 후 훅 Bash 포함) · 요구사항 추적(연결 · 조회 · 위반 6종 · 구현 전 경고 · 요구사항 커버리지 · 기본 marker · check-code 연동 · 꺼짐) · 작업 구간(자동 시작 · 자기 무시 · 라운드 상한 · S verify · L 게이트 · 리뷰 뒤 소스 변경 · 리뷰어 새 테스트 · 위험 영역 L · 커밋 뒤 증거 유지 · push 시 정리 · 사람 push 제외 · 안전한 30일 정리 · settings 동기화) · Mutation Guard(baseline · planner 위반 · 되돌리지 않음 · 새 테스트 허용 · 기존 테스트 수정/삭제 · stage/커밋 · 메인 편집 제외 · 사전 차단 · 게이트 무효 · 종료 전 알림 · 끄기) · 토큰 실측(중복 제거 · 구간 · 역할 · Codex 증분 · 원문 미저장 · 도입 전 · 보고/비교 · 종료 시 기록) · 규칙 중복 · 승격 PR · GitHub 지표 | ✅ (Python 3.9) |
 | 실제 Flutter 앱 | 서브모듈 추가 → init → fvm 3.35.0 · `flutter create` → 린트 템플릿 · Riverpod · go_router · logger · mocktail → 골격 · 규칙 · layers → `harness test` · `run analyze` · `verify` | ✅ 테스트 통과 · 분석 0건 · verify 통과 · `flutter create` 가 `.gitignore` · `AGENTS.md` 를 덮어쓰지 않음 |
 | 위반 검출 (실제 앱) | domain 에 `material.dart` import · `print` · 포맷 깨짐 | ✅ `layer` · `logging` · `dart-format` · `analyze-warning` · `analyze-info` |
 | Claude 규칙 · 스킬 · 역할 로드 | 헤드리스 세션 기록 (Claude Code 2.1.322 · 2.1.328) | ✅ 시작 시 `CLAUDE.md` · `core.md` · `project.md`, `lib/main.dart` 를 읽으면 `architecture.md` · `flutter.md` 추가 (`testing.md` 는 안 읽힘 — 의도대로). 스킬 5 · 역할 2 등록. (2.1.328 은 임시 폴더에서 링크 없는 `CLAUDE.md` 도 읽지 않아 — 폴더 신뢰 · 경로 요인 — 규칙 로드는 2.1.322 로 확인, 스킬 · 역할 등록은 두 버전 모두 확인) |
