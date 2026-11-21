@@ -120,5 +120,8 @@
       "**/*.config.dart",
       "**/*.mocks.dart"
     ]
+  },
+  "config_literals": {
+    "enabled": false
   }
 }
