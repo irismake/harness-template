@@ -1095,6 +1095,51 @@ class WorkTest(unittest.TestCase):
         self.run_cmd("test", CHAT_TEST)
         self.assertIn("리뷰(r1) 시작 뒤 소스가 바뀌었다", self.work("gate").stdout)
 
+    def pass_reviewed_feature(self):
+        """L 작업: 리뷰 PASS · verify · 관련 테스트까지 통과한 상태"""
+        self.spawn("planner")
+        self.write_feature()
+        self.spawn("reviewer")
+        (self.p.root / self.state()["rounds"][-1]["path"]).write_text(PASS_REPORT)
+        self.run_cmd("verify")
+        self.run_cmd("test", CHAT_TEST)
+        self.assertEqual(self.work("gate").returncode, 0, self.work("gate").stdout)
+
+    def update_harness(self):
+        """하네스 업데이트 = .harness/core 내용(서브모듈이면 포인터)만 바뀐다"""
+        with open(self.p.root / ".harness/core/CHANGELOG.md", "a") as f:
+            f.write("\n- 새 릴리스\n")
+
+    def test_harness_update_after_review_keeps_review_but_needs_reverify(self):
+        self.pass_reviewed_feature()
+        self.update_harness()
+        out = self.work("gate").stdout
+        self.assertNotIn("소스가 바뀌었다", out, "앱 소스는 그대로 — 리뷰는 유효하다")
+        # 검사 기준이 바뀌었으니 verify · 관련 테스트는 새 하네스로 다시 통과해야 한다
+        self.assertIn("harness verify", out)
+        self.assertIn("통과한 테스트 실행 기록이 없다", out)
+        self.run_cmd("verify")
+        self.run_cmd("test", CHAT_TEST)
+        self.assertEqual(self.work("gate").returncode, 0, self.work("gate").stdout)
+
+    def test_harness_update_with_source_change_still_invalidates_review(self):
+        self.pass_reviewed_feature()
+        self.update_harness()
+        self.p.write(CHAT, "void send() {}\n// 바뀜\n")
+        self.run_cmd("verify")
+        self.run_cmd("test", CHAT_TEST)
+        self.assertIn("리뷰(r1) 시작 뒤 소스가 바뀌었다", self.work("gate").stdout)
+
+    def test_round_opened_by_older_harness_compares_with_harness_included(self):
+        self.pass_reviewed_feature()
+        path = self.p.root / ".harness/_workspace/feat-chat/run.json"
+        st = self.state()
+        del st["rounds"][-1]["fp_review"]  # 이전 하네스가 연 라운드
+        path.write_text(json.dumps(st))
+        self.assertEqual(self.work("gate").returncode, 0, self.work("gate").stdout)
+        self.update_harness()
+        self.assertIn("리뷰(r1) 시작 뒤 소스가 바뀌었다", self.work("gate").stdout)
+
     def test_reviewer_new_test_does_not_invalidate_review(self):
         self.spawn("planner")
         self.write_feature()
