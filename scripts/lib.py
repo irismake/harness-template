@@ -162,8 +162,20 @@ def load_checks(cfg):
     return [m for m in mods if m]
 
 
+# 레포를 고정하는 git 환경 변수 (`git rev-parse --local-env-vars`). git 훅 안에서는 git 이 GIT_DIR 등을 넣어 주는데,
+# worktree 에서는 절대 경로라 다른 레포(.harness/core 서브모듈)를 부를 때 그대로 넘기면 바깥 레포를 보게 된다.
+GIT_REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+                "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_CONFIG", "GIT_IMPLICIT_WORK_TREE",
+                "GIT_INTERNAL_SUPER_PREFIX")
+
+
 def git(*args, cwd=None, check=True):
-    return subprocess.run(["git", "-C", str(cwd or ROOT), *args], capture_output=True, text=True, check=check).stdout
+    env = None
+    if cwd is not None and Path(cwd).resolve() != ROOT.resolve():
+        env = {k: v for k, v in os.environ.items() if k not in GIT_REPO_ENV}
+    return subprocess.run(["git", "-C", str(cwd or ROOT), *args], capture_output=True, text=True, check=check,
+                          env=env).stdout
 
 
 def tracked_files():

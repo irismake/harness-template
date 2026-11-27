@@ -409,6 +409,56 @@ class ReleaseBranchTest(unittest.TestCase):
         self.assertEqual(_git(self.app, "config", "-f", ".gitmodules", "submodule..harness/core.branch"), "release")
 
 
+class WorktreeHookTest(unittest.TestCase):
+    """git worktree 에서 커밋할 때: 훅이 받는 GIT_DIR 등이 서브모듈(.harness/core) 검사로 새지 않는다."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        src = base / "template"
+        shutil.copytree(TEMPLATE, src, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        _git(src, "init", "-q", "-b", "release")
+        _git(src, "add", "-A")
+        _git(src, "commit", "-q", "-m", "release")
+        app = base / "app"
+        app.mkdir()
+        _git(app, "init", "-q", "-b", "main")
+        _git(app, "submodule", "add", "-q", "-b", "release", str(src), ".harness/core")
+        self.run_in(app, sys.executable, ".harness/core/scripts/harness.py", "init", "flutter")
+        _git(app, "add", "-A")
+        _git(app, "commit", "-q", "--no-verify", "-m", "chore: 하네스 설치")
+        self.wt = base / "wt"
+        _git(app, "worktree", "add", "-q", "-b", "feat/x", str(self.wt))
+        _git(self.wt, "submodule", "update", "-q", "--init")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_in(self, cwd, *args):
+        return subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=GIT_FILE_ENV)
+
+    def commit_harness_change(self, cwd):
+        with open(cwd / ".harness/rules/project.md", "a") as f:
+            f.write("\n- 메모\n")
+        _git(cwd, "add", "-A")
+        return self.run_in(cwd, "git", "commit", "-q", "-m", "docs: 프로젝트 규칙")
+
+    def test_commit_in_worktree_does_not_report_core_modified(self):
+        r = self.commit_harness_change(self.wt)
+        self.assertNotIn("공유 하네스(.harness/core)가 프로젝트 안에서 수정됐습니다", r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_modified_core_in_worktree_is_still_detected(self):
+        with open(self.wt / ".harness/core/README.md", "a") as f:
+            f.write("\n바뀜\n")
+        r = self.commit_harness_change(self.wt)
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("공유 하네스(.harness/core)가 프로젝트 안에서 수정됐습니다", out)
+        self.assertIn("M README.md", out)
+        self.assertNotIn(".claude/", out, "바깥 레포 파일을 서브모듈 변경으로 보고하면 안 된다")
+
+
 class UpgradeCompatibilityTest(unittest.TestCase):
     """이전 정식 릴리스(최신 v* 태그)로 설치한 프로젝트를 지금 작업 트리로 올려도 sync 후 구성 검사가 통과한다."""
 
